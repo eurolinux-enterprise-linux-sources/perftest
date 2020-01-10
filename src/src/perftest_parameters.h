@@ -33,19 +33,22 @@
  *
  * Description :
  *
- *  This API gathres the Socket interface methods for all perftest benchmarks
- *  and can be used for any benchmark for IB.
- *  It passes messages between 2 end points through sockets interface methods,
- *  while passing the rellevant information for the IB entities.
+ *  This API defines structs, formats and enums for all perftest benchmarks.
+ *  It includes parameters parser, and a report generator.
  *
  * Methods :
  *
- *  ctx_get_local_lid  - Receives the Local id from the subnet manager.
- *  ctx_client_connect - Connects the client through sockets interface.
- *  ctx_server_connect - Connects the Server to client through sockets.
- *  ctx_hand_shake     - Passes the data between 2 end points machines.
- *  ctx_print_pingpong_data - Prints the data that was passed.
- *  ctx_close_connection    - Closing the sockets interface.
+ *  link_layer_str  - Return a String representation of the link type.
+ *  parser - Setting default test parameters and parsing the user choices.
+ *  check_link - Configures test MTU,inline and link layer of the test.
+ *  check_link_and_mtu     - Configures test MTU,inline and link layer of the test.
+ *  print_report_bw - Calculate the peak and average throughput of the BW test.
+ *  print_full_bw_report    - Print the peak and average throughput of the BW test.
+ *  print_report_lat - Print the min/max/median latency samples taken from a latency test.
+ *  print_report_lat_duration     - Prints only the avergae latency for samples taken from 
+ *									a latency test with Duration..
+ *  set_mtu - set MTU from the port or user.
+ *  set_eth_mtu    - set MTU for Raw Ethernet tests.
  */
 #ifndef PERFTEST_PARAMETERS_H
 #define PERFTEST_PARAMETERS_H
@@ -60,12 +63,21 @@
 #include <config.h>
 #endif
 
+#ifdef HAVE_VERBS_EXP
+#include <infiniband/verbs_exp.h>
+#endif
+
+#ifdef HAVE_CUDA
+#include CUDA_PATH
+#endif
+
 // Connection types available.
 #define RC  (0)
 #define UC  (1)
 #define UD  (2)
 #define RawEth  (3)
-// #define XRC 3 (TBD)
+#define XRC (4)
+#define DC  (5)
 
 // Genral control definitions
 #define OFF	     (0)
@@ -104,13 +116,17 @@
 #define DEF_QKEY      0x11111111
 #define DEF_DURATION  (5)
 #define	DEF_MARGIN    (2)
+#define DEF_INIT_MARGIN (-1)
 #define DEF_INLINE    (-1)
 #define DEF_TOS       (-1)
+#define DEF_RETRY_COUNT (7)
 
 // Optimal Values for Inline
 #define DEF_INLINE_WRITE (220)
 #define DEF_INLINE_SEND_RC_UC (236)
+#define DEF_INLINE_SEND_XRC (236)
 #define DEF_INLINE_SEND_UD (188)
+#define DEF_INLINE_DC (150)
 
 // Max and Min allowed values for perftest parameters.
 #define MIN_TOS		(0)
@@ -134,6 +150,7 @@
 #define MIN_CQ_MOD    (1)
 #define MAX_CQ_MOD    (1024)
 #define MAX_INLINE    (912)
+#define MAX_INLINE_UD (884)
 
 // Raw etherent defines
 #define RAWETH_MIN_MSG_SIZE	(64)
@@ -144,21 +161,37 @@
 #define RESULT_LINE "---------------------------------------------------------------------------------------\n"
 
 // The format of the results
-#define RESULT_FMT		" #bytes     #iterations    BW peak[MB/sec]    BW average[MB/sec]   MsgRate[Mpps]\n"
+#define RESULT_FMT		" #bytes     #iterations    BW peak[MB/sec]    BW average[MB/sec]   MsgRate[Mpps]"
 
-#define RESULT_FMT_G	" #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]\n"
+#define RESULT_FMT_G	" #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]"
 
-#define RESULT_FMT_LAT " #bytes #iterations    t_min[usec]    t_max[usec]  t_typical[usec]\n"
+#define RESULT_FMT_QOS  " #bytes    #sl      #iterations    BW peak[MB/sec]    BW average[MB/sec]   MsgRate[Mpps]"
 
-#define RESULT_FMT_LAT_DUR " #bytes        #iterations       t_avg[usec]\n"
+#define RESULT_FMT_G_QOS  " #bytes    #sl      #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]"
+
+#define RESULT_FMT_LAT " #bytes #iterations    t_min[usec]    t_max[usec]  t_typical[usec]"
+
+#define RESULT_FMT_LAT_DUR " #bytes        #iterations       t_avg[usec]  	"
+
+#define RESULT_EXT "\n"
+
+#define RESULT_EXT_CPU_UTIL "    CPU_Util[%%]\n"
 
 // Result print format
-#define REPORT_FMT     " %-7lu    %d           %-7.2lf            %-7.2lf		   %-7.6lf\n"
+#define REPORT_FMT     " %-7lu    %lu           %-7.2lf            %-7.2lf		   %-7.6lf"
+
+#define REPORT_FMT_EXT     " %-7lu    %lu           %-7.6lf            %-7.6lf		   %-7.6lf"
+
+#define REPORT_EXT	"\n"
+
+#define REPORT_EXT_CPU_UTIL	"	    %-3.2f\n"
+
+#define REPORT_FMT_QOS " %-7lu    %d           %lu           %-7.2lf            %-7.2lf                  %-7.6lf\n"
 
 // Result print format for latency tests.
-#define REPORT_FMT_LAT " %-7lu %d          %-7.2f        %-7.2f      %-7.2f\n"
+#define REPORT_FMT_LAT " %-7lu %d          %-7.2f        %-7.2f      %-7.2f"
 
-#define REPORT_FMT_LAT_DUR " %-7lu       %d            %-7.2f\n"
+#define REPORT_FMT_LAT_DUR " %-7lu       %d            %-7.2f"
 
 #define CHECK_VALUE(arg,type,minv,maxv,name) 						    					\
 	{ arg = (type)strtol(optarg, NULL, 0); if ((arg < minv) || (arg > maxv))                \
@@ -174,6 +207,8 @@
 	{ ALLOCATE(orig,char,(strlen(temp) + 1)); strcpy(orig,temp); }
 
 #define MTU_SIZE(mtu_ind) (((uint64_t)1 << (MTU_FIX + mtu_ind)))
+
+#define MAX_VERSION 16		// Reserve 15 bytes for version numbers
 
 // The Verb of the benchmark.
 typedef enum { SEND , WRITE, READ, ATOMIC } VerbType;
@@ -213,7 +248,26 @@ enum ctx_device {
 	LEGACY 			= 5,
 	CHELSIO_T4 		= 6,
 	CHELSIO_T5 		= 7,
-	CONNECTX3_PRO	= 8
+	CONNECTX3_PRO		= 8,
+	SKYHAWK			= 9
+};
+
+// Units for rate limiter
+enum rate_limiter_units {MEGA_BYTE_PS, GIGA_BIT_PS, PACKET_PS};
+
+// Verbosity Levels for test report
+enum verbosity_level {FULL_VERBOSITY=-1, OUTPUT_BW=0, OUTPUT_MR, OUTPUT_LAT };
+
+struct cpu_util_data {
+	int enable;
+        long long ustat[2];
+        long long idle[2];
+};
+
+struct check_alive_data {
+	int current_totrcnt;
+	int last_totrcnt;
+	int g_total_iters;
 };
 
 struct perftest_parameters {
@@ -226,12 +280,14 @@ struct perftest_parameters {
 	int				mtu;
 	enum ibv_mtu	curr_mtu;
 	uint64_t		size;
+	uint64_t		dct_key;
 	int				iters;
 	int				tx_depth;
 	uint8_t			qp_timeout;
 	uint8_t			sl;
 	int				gid_index;
 	int				gid_index2;
+	int				use_gid_user;
 	uint8_t			source_mac[6];
 	uint8_t			dest_mac[6];
 	int				is_source_mac;
@@ -242,6 +298,7 @@ struct perftest_parameters {
 	int				is_client_ip;
 	int				server_port;
 	int				client_port;
+	int				tcp;
 	int				is_server_port;
 	int				is_client_port;
 	int				cpu_freq_f;
@@ -249,6 +306,7 @@ struct perftest_parameters {
 	int				num_of_qps;
 	int				use_event;
 	int 			inline_size;
+	int				inline_recv_size;
 	int				out_reads;
 	int				rx_depth;
 	int				duplex;
@@ -258,6 +316,10 @@ struct perftest_parameters {
 	int 			dualport;
 	int 			post_list;
 	int				duration;
+	int 			use_srq;
+	int				use_xrc;
+	int				use_rss;
+	int				srq_exists;
 	int				tos;
 	int				margin;
 	int 			is_bw_limit_passed;
@@ -278,29 +340,57 @@ struct perftest_parameters {
 	TestMethod		test_type;
 	DurationStates	state;
 	int				sockfd;
-	const char		*version;
+	char			version[MAX_VERSION];
+	char			rem_version[MAX_VERSION];
 	cycles_t		*tposted;
 	cycles_t		*tcompleted;
 	int				use_mcg;
 	int 			use_rdma_cm;
+	int				is_reversed;
 	int				work_rdma_cm;
 	char			*user_mgid;
 	int				buff_size;
+	int             pkey_index;
+	int				raw_qos;
+	int				use_cuda;
 	// New test params format pilot. will be used in all flags soon,.
 	enum ctx_test_method 	test_method;
 	enum ibv_transport_type transport_type;
 	enum ctx_report_fmt		report_fmt;
 	struct report_options  	*r_flag;
 	int 			mac_fwd;
+	int report_both; //in bidirectional tests, report tx and rx separately
 	//results limits
 	float min_bw_limit;
 	float min_msgRate_limit;
+	// Rate Limiter
+	int is_rate_limiting;
+	int rate_limit;
+	int burst_size;
+	enum rate_limiter_units rate_units;
+	enum verbosity_level output;
+	int cpu_util;
+	struct cpu_util_data cpu_util_data;
+	int latency_gap;
+	int retry_count;
+	int dont_xchg_versions;
+	int use_exp;
+	int ipv6;
 };
 
 struct report_options {
 	int unsorted;
 	int histogram;
 	int cycles;
+};
+
+struct bw_report_data {
+	unsigned long size;
+	uint64_t iters;
+	double bw_peak;
+	double bw_avg;
+	double msgRate_avg;
+	int sl;
 };
 
 /* link_layer_str
@@ -335,7 +425,20 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc);
  *
  * Parameters :
  *
- *	 context    - Context of the deivce.
+ *	 context    - Context of the device.
+ *	 user_param - Perftest parameters.
+ *
+ * Return Value : SUCCESS, FAILURE.
+ */
+int check_link(struct ibv_context *context,struct perftest_parameters *user_param);
+
+/* check_link_and_mtu
+ *
+ * Description : Configures test MTU,inline and link layer of the test.
+ *
+ * Parameters :
+ *
+ *	 context    - Context of the device.
  *	 user_param - Perftest parameters.
  *
  * Return Value : SUCCESS, FAILURE.
@@ -355,14 +458,30 @@ void ctx_print_test_info(struct perftest_parameters *user_param);
 
 /* print_report_bw
  *
- * Description : Print the peak and average throughput of the BW test.
+ * Description : Calculate the peak and average throughput of the BW test.
+ *				 The function will print when not in duplex mode.
  *
  * Parameters :
  *
  *	 user_param  - the parameters parameters.
+ *   my_bw_rep   - get my bw test report.
  *
  */
-void print_report_bw (struct perftest_parameters *user_param);
+void print_report_bw (struct perftest_parameters *user_param, struct bw_report_data *my_bw_rep);
+
+/* print_full_bw_report
+ *
+ * Description : Print the peak and average throughput of the BW test.
+ *				 If rem_bw_rep is not NULL, the function will sum the server and client results.
+ *
+ * Parameters :
+ *
+ *	 user_param  - the parameters parameters.
+ *   my_bw_rep   - my bw test report.
+ *   rem_bw_rep   - remote's bw test report.
+ *
+ */
+void print_full_bw_report (struct perftest_parameters *user_param, struct bw_report_data *my_bw_rep, struct bw_report_data *rem_bw_rep);
 
 /* print_report_lat
  *
@@ -387,5 +506,31 @@ void print_report_lat (struct perftest_parameters *user_param);
  *
  */
 void print_report_lat_duration (struct perftest_parameters *user_param);
+
+/* set_mtu
+ *
+ * Description : set MTU from the port or user
+ *
+ * Parameters :
+ *
+ *   context  - Context of the device.
+ *   ib_port  - ib port number that's in use.
+ *   user_mtu  - MTU that the user supplied.
+ *
+ * Return Value : MTU size
+ */
+enum ibv_mtu set_mtu(struct ibv_context *context,uint8_t ib_port,int user_mtu);
+
+/* set_eth_mtu
+ *
+ * Description : set MTU for Raw Ethernet tests
+ *
+ * Parameters :
+ *
+ *   user_param  - the parameters parameters.
+ *
+ * Return Value : MTU size
+ */
+int set_eth_mtu(struct perftest_parameters *user_param);
 
 #endif /* PERFTEST_RESOURCES_H */

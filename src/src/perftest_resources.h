@@ -69,6 +69,7 @@
 #define CACHE_LINE_SIZE     (64)
 #define NUM_OF_RETRIES		(10)
 
+
 // Outstanding reads for "read" verb only.
 #define MAX_SEND_SGE        (1)
 #define MAX_RECV_SGE        (1)
@@ -84,18 +85,23 @@
 #define PINGPONG_ATOMIC_WRID (22)
 #define DEFF_QKEY            (0x11111111)
 
+#ifdef HAVE_XRCD
+#define SERVER_FD "/tmp/xrc_domain_server"
+#define CLIENT_FD "/tmp/xrc_domain_client"
+#endif
+
 //global variables
 extern int cycle_buffer;
 
 #define NOTIFY_COMP_ERROR_SEND(wc,scnt,ccnt)                     											\
 	{ fprintf(stderr," Completion with error at client\n");      											\
 	  fprintf(stderr," Failed status %d: wr_id %d syndrom 0x%x\n",wc.status,(int) wc.wr_id,wc.vendor_err);	\
-	  fprintf(stderr, "scnt=%d, ccnt=%d\n",scnt, ccnt);	return 1;}
+	  fprintf(stderr, "scnt=%lu, ccnt=%lu\n",scnt, ccnt);	return 1;}
 
 #define NOTIFY_COMP_ERROR_RECV(wc,rcnt)                     											    \
 	{ fprintf(stderr," Completion with error at server\n");      											\
 	  fprintf(stderr," Failed status %d: wr_id %d syndrom 0x%x\n",wc.status,(int) wc.wr_id,wc.vendor_err);	\
-	  fprintf(stderr," rcnt=%d\n",rcnt); return 1;}
+	  fprintf(stderr," rcnt=%lu\n",rcnt); return 1;}
 
 // Macro to determine packet size in case of UD.
 // The UD addition is for the GRH .
@@ -132,19 +138,42 @@ struct pingpong_context {
 	void						*buf;
 	struct ibv_ah				**ah;
 	struct ibv_qp				**qp;
+#if defined(HAVE_VERBS_EXP)
+	struct ibv_exp_dct			**dct;
+#endif
+	struct ibv_srq				*srq;
 	struct ibv_sge				*sge_list;
 	struct ibv_sge				*recv_sge_list;
+#if defined(HAVE_VERBS_EXP)
+	struct ibv_exp_send_wr			*exp_wr;
+#endif
 	struct ibv_send_wr			*wr;
 	struct ibv_recv_wr			*rwr;
-	uint64_t					size;
-	uint64_t					*my_addr;
-	uint64_t					*rx_buffer_addr;
-	uint64_t					*rem_addr;
-	uint64_t					buff_size;
-	int							tx_depth;
-	int							*scnt;
-	int							*ccnt;
-	int							is_contig_supported;
+	uint64_t				size;
+	uint64_t				*my_addr;
+	uint64_t				*rx_buffer_addr;
+	uint64_t				*rem_addr;
+	uint64_t				buff_size;
+	int					tx_depth;
+	uint64_t				*scnt;
+	uint64_t				*ccnt;
+	int					is_contig_supported;
+	uint32_t                                *ctrl_buf;
+	uint32_t                                *credit_buf;
+	struct ibv_mr                           *credit_mr;
+	struct ibv_sge                          *ctrl_sge_list;
+	struct ibv_send_wr                      *ctrl_wr;
+	int                                     send_rcredit;
+	int                                     credit_cnt;
+#ifdef HAVE_XRCD
+	struct ibv_xrcd				*xrc_domain;
+	int 					fd;
+#endif
+#if defined(HAVE_VERBS_EXP) 
+        drv_exp_post_send_func exp_post_send_func_pointer;
+        drv_post_send_func post_send_func_pointer;
+	drv_poll_cq_func poll_cq_func_pointer;
+#endif
 };
 
  struct pingpong_dest {
@@ -155,6 +184,7 @@ struct pingpong_context {
 	unsigned			rkey;
 	unsigned long long	vaddr;
 	union ibv_gid		gid;
+	unsigned			srqn;
  };
 
 /******************************************************************************
@@ -196,9 +226,9 @@ int check_add_port(char **service,int port,
  *
  * Parameters :
  *
- *	ib_devname - The name of the deivce requested or NULL for the first one.
+ *	ib_devname - The name of the device requested or NULL for the first one.
  *
- * Return Value : the deivce or NULL in case of failure.
+ * Return Value : the device or NULL in case of failure.
  */
 struct ibv_device* ctx_find_dev(const char *ib_devname);
 
@@ -213,6 +243,19 @@ struct ibv_device* ctx_find_dev(const char *ib_devname);
  * Return Value : SUCCESS, FAILURE.
  */
 int create_rdma_resources(struct pingpong_context *ctx,
+                          struct perftest_parameters *user_param);
+
+/* destroy_rdma_resources
+ *
+ * Description : Destroys the rdma_cm_id and rdma_channel for the rdma_cm QPs.
+ *
+ * Parameters :
+ *	ctx - Resources sructure.
+ * 	user_param - the perftest parameters.
+ *
+ * Return Value : SUCCESS, FAILURE.
+ */
+int destroy_rdma_resources(struct pingpong_context *ctx,
                           struct perftest_parameters *user_param);
 
 /* alloc_ctx
@@ -236,7 +279,7 @@ void alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_par
  * Return Value : SUCCESS, FAILURE.
  */
 int destroy_ctx(struct pingpong_context *ctx,
-				struct perftest_parameters *user_parm);
+				struct perftest_parameters *user_param);
 
 /* ctx_init
  *
@@ -286,7 +329,7 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
  * Return Value : SUCCESS, FAILURE.
  *
  */
-int ctx_modify_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_param);
+int ctx_modify_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_param, uint64_t init_flag);
 
 /* ctx_connect.
  *
@@ -298,7 +341,7 @@ int ctx_modify_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_par
  *
  *	ctx     - Test Context.
  *  dest    - pingpong_dest struct of the remote side.
- *	user_parm  - user_parameters struct for this test.
+ *	user_param  - user_parameters struct for this test.
  *  my_dest - pingpong_dest struct of this side.
  *
  * Return Value : SUCCESS, FAILURE.
@@ -306,8 +349,43 @@ int ctx_modify_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_par
  */
 int ctx_connect(struct pingpong_context *ctx,
 				struct pingpong_dest *dest,
-				struct perftest_parameters *user_parm,
+				struct perftest_parameters *user_param,
 				struct pingpong_dest *my_dest);
+
+/* ctx_set_send_exp_wqes.
+ *
+ * Description :
+ *
+ *	Prepare the exp send work request templates for all QPs
+ *
+ * Parameters :
+ *
+ *	ctx     - Test Context.
+ *	user_param  - user_parameters struct for this test.
+ *  rem_dest   - pingpong_dest struct of the remote side.
+ *
+ */
+void ctx_set_send_exp_wqes(struct pingpong_context *ctx,
+					   struct perftest_parameters *user_param,
+					   struct pingpong_dest *rem_dest);
+
+
+/* ctx_set_send_regwqes.
+ *
+ * Description :
+ *
+ *	Prepare the regular send work request templates for all QPs
+ *
+ * Parameters :
+ *
+ *	ctx     - Test Context.
+ *	user_param  - user_parameters struct for this test.
+ *  rem_dest   - pingpong_dest struct of the remote side.
+ *
+ */
+void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
+					   struct perftest_parameters *user_param,
+					   struct pingpong_dest *rem_dest);
 
 /* ctx_set_send_wqes.
  *
@@ -318,13 +396,14 @@ int ctx_connect(struct pingpong_context *ctx,
  * Parameters :
  *
  *	ctx     - Test Context.
- *	user_parm  - user_parameters struct for this test.
+ *	user_param  - user_parameters struct for this test.
  *  rem_dest   - pingpong_dest struct of the remote side.
  *
  */
 void ctx_set_send_wqes(struct pingpong_context *ctx,
 					   struct perftest_parameters *user_param,
 					   struct pingpong_dest *rem_dest);
+
 
 /* ctx_set_recv_wqes.
  *
@@ -335,11 +414,48 @@ void ctx_set_send_wqes(struct pingpong_context *ctx,
  * Parameters :
  *
  *	ctx     - Test Context.
- *	user_parm  - user_parameters struct for this test.
+ *	user_param  - user_parameters struct for this test.
  *
  */
 int ctx_set_recv_wqes(struct pingpong_context *ctx,struct perftest_parameters *user_param);
 
+/* ctx_alloc_credit
+ *
+ * Description :
+ *
+ * 	Allocate resources to support the credit exchange mechanism,
+ * 	which allows ib_send_bw to work with iWARP
+ *
+ * Parameters :
+ *
+ *	ctx        - test context
+ *  	user_param - user parameters struct for this test
+ *  	my_dest    - pingpong_dest struct of the this side
+ *
+ *  	my_dest is updated to store the credit buf vaddr and rkey
+ *  	which need to be exchanged with the remote side
+ *  	to enable RDMA WRITE op
+ */
+int ctx_alloc_credit(struct pingpong_context *ctx,
+				struct perftest_parameters *user_param,
+				struct pingpong_dest *my_dest);
+/* ctx_set_credit_wqes
+ *
+ * Description :
+ *
+ * 	Prepare the send credit work request templates for all QPs
+ * 	RDMA WRITE op is used for sending credit
+ * 	Credit exchange is necessary for ib_send_bw to work with iWARP
+ *
+ * Parameters :
+ *
+ *	ctx        - test context
+ *  	user_param - user parameters struct for this test
+ *  	rem_dest   - pingpong_dest struct of the remote side.
+ */
+int ctx_set_credit_wqes(struct pingpong_context *ctx,
+				struct perftest_parameters *user_param,
+				struct pingpong_dest *rem_dest);
 /* run_iter_bw.
  *
  * Description :
@@ -349,7 +465,7 @@ int ctx_set_recv_wqes(struct pingpong_context *ctx,struct perftest_parameters *u
  * Parameters :
  *
  *	ctx     - Test Context.
- *	user_parm  - user_parameters struct for this test.
+ *	user_param  - user_parameters struct for this test.
  *
  */
 int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_param);
@@ -363,7 +479,7 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
  * Parameters :
  *
  *	ctx     - Test Context.
- *	user_parm  - user_parameters struct for this test.
+ *	user_param  - user_parameters struct for this test.
  *
  */
 int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_parameters *user_param);
@@ -377,7 +493,7 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
  * Parameters :
  *
  *	ctx     - Test Context.
- *	user_parm  - user_parameters struct for this test.
+ *	user_param  - user_parameters struct for this test.
  *
  */
 int run_iter_bw_infinitely_server(struct pingpong_context *ctx, struct perftest_parameters *user_param);
@@ -391,7 +507,7 @@ int run_iter_bw_infinitely_server(struct pingpong_context *ctx, struct perftest_
  * Parameters :
  *
  *	ctx     - Test Context.
- *	user_parm  - user_parameters struct for this test.
+ *	user_param  - user_parameters struct for this test.
  *
  */
 int run_iter_bw_server(struct pingpong_context *ctx, struct perftest_parameters *user_param);
@@ -405,7 +521,7 @@ int run_iter_bw_server(struct pingpong_context *ctx, struct perftest_parameters 
  * Parameters :
  *
  *	ctx     - Test Context.
- *	user_parm  - user_parameters struct for this test.
+ *	user_param  - user_parameters struct for this test.
  *
  */
 int run_iter_bi(struct pingpong_context *ctx,struct perftest_parameters *user_param);
@@ -419,7 +535,7 @@ int run_iter_bi(struct pingpong_context *ctx,struct perftest_parameters *user_pa
  * Parameters :
  *
  *	ctx     - Test Context.
- *	user_parm  - user_parameters struct for this test.
+ *	user_param  - user_parameters struct for this test.
  */
 int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *user_param);
 
@@ -432,7 +548,7 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
  * Parameters :
  *
  *  ctx     - Test Context.
- *  user_parm  - user_parameters struct for this test.
+ *  user_param  - user_parameters struct for this test.
  */
 int run_iter_lat(struct pingpong_context *ctx,struct perftest_parameters *user_param);
 
@@ -445,7 +561,7 @@ int run_iter_lat(struct pingpong_context *ctx,struct perftest_parameters *user_p
  * Parameters :
  *
  *  ctx     - Test Context.
- *  user_parm  - user_parameters struct for this test.
+ *  user_param  - user_parameters struct for this test.
  */
 int run_iter_lat_send(struct pingpong_context *ctx,struct perftest_parameters *user_param);
 
@@ -496,18 +612,6 @@ static __inline int ctx_notify_events(struct ibv_comp_channel *channel) {
 
 
 
-/* gen_ip_header .
-
- * Description :create IP header on buffer
- *
- * Parameters :
- * 		ip_header_buff - Pointer to output
- * 		saddr - source IP address of the packet(network order)
- * 		daddr - destination IP address of the packet(network order)
- * 		sizePkt - size of the packet
- */
-void gen_ip_header(void* ip_header_buff,uint32_t* saddr ,uint32_t* daddr,uint8_t protocol,int sizePkt);
-
 /* gen_udp_header .
 
  * Description :create UDP header on buffer
@@ -537,7 +641,27 @@ void gen_udp_header(void* UDP_header_buffer,int* sPort ,int* dPort,uint32_t sadd
  *
  * Return Value : SUCCESS, FAILURE.
  */
-static __inline void increase_rem_addr(struct ibv_send_wr *wr,int size,int scnt,uint64_t prim_addr,VerbType verb) {
+
+#if defined(HAVE_VERBS_EXP)
+static __inline void increase_exp_rem_addr(struct ibv_exp_send_wr *wr,int size,uint64_t scnt,uint64_t prim_addr,VerbType verb) {
+
+	if (verb == ATOMIC)
+		wr->wr.atomic.remote_addr += INC(size);
+
+	else
+		wr->wr.rdma.remote_addr += INC(size);
+
+	if ( ((scnt+1) % (cycle_buffer/ INC(size))) == 0) {
+
+		if (verb == ATOMIC)
+			wr->wr.atomic.remote_addr = prim_addr;
+
+		else
+			wr->wr.rdma.remote_addr = prim_addr;
+	}
+}
+#endif
+static __inline void increase_rem_addr(struct ibv_send_wr *wr,int size,uint64_t scnt,uint64_t prim_addr,VerbType verb) {
 
 	if (verb == ATOMIC)
 		wr->wr.atomic.remote_addr += INC(size);
@@ -569,7 +693,7 @@ static __inline void increase_rem_addr(struct ibv_send_wr *wr,int size,int scnt,
  *		prim_addr - The address of the original buffer.
  *		server_is_ud - Indication to weather we are in UD mode.
  */
-static __inline void increase_loc_addr(struct ibv_sge *sg,int size,int rcnt,uint64_t prim_addr,int server_is_ud) {
+static __inline void increase_loc_addr(struct ibv_sge *sg,int size,uint64_t rcnt,uint64_t prim_addr,int server_is_ud) {
 
 	sg->addr  += INC(size);
 
@@ -589,6 +713,8 @@ static __inline void increase_loc_addr(struct ibv_sge *sg,int size,int rcnt,uint
  */
 void catch_alarm(int sig);
 
+void check_alive(int sig);
+
 /* catch_alarm.
  *
  * Description :
@@ -598,6 +724,24 @@ void catch_alarm(int sig);
  */
 void catch_alarm_infintely(int sig) ;
 
+/* ctx_modify_dc_qp_to_init.
+ *
+ * Description :
+ *
+ *	Modifies the given QP to INIT state , according to attributes in param.
+ *  The relevent attributes are ib_port, connection_type and verb.
+ *
+ * Parameters :
+ *
+ *	qp     - The QP that will be moved to INIT.
+ *	param  - The parameters for the QP.
+ *
+ * Return Value : SUCCESS, FAILURE.
+ *
+ */
+int ctx_modify_dc_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_param);
+
+int perform_warm_up(struct pingpong_context *ctx,struct perftest_parameters *user_param);
 /******************************************************************************
  *
  ******************************************************************************/

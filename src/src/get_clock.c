@@ -132,11 +132,14 @@ static double sample_get_cpu_mhz(void)
 	return b;
 }
 
+#ifndef __s390x__
 static double proc_get_cpu_mhz(int no_cpu_freq_fail)
 {
 	FILE* f;
 	char buf[256];
 	double mhz = 0.0;
+	int print_flag = 0;
+	double delta;
 
 	f = fopen("/proc/cpuinfo","r");
 	if (!f)
@@ -162,7 +165,9 @@ static double proc_get_cpu_mhz(int no_cpu_freq_fail)
 			mhz = m;
 			continue;
 		}
-		if (mhz != m) {
+		delta = mhz > m ? mhz - m : m - mhz;
+		if ((delta / mhz > 0.02) && (print_flag ==0)) {
+			print_flag = 1;
 			fprintf(stderr, "Conflicting CPU frequency values"
 				" detected: %lf != %lf\n", mhz, m);
 			if (no_cpu_freq_fail) {
@@ -176,23 +181,34 @@ static double proc_get_cpu_mhz(int no_cpu_freq_fail)
 	fclose(f);
 	return mhz;
 }
-
+#endif
 
 double get_cpu_mhz(int no_cpu_freq_fail)
 {
+#ifdef __s390x__
+	return sample_get_cpu_mgz();
+#else
 	double sample, proc, delta;
 	sample = sample_get_cpu_mhz();
 	proc = proc_get_cpu_mhz(no_cpu_freq_fail);
-
+	#ifdef __aarch64__
+	if (proc < 1) //no cpu_freq info in /proc/cpuinfo
+	{
+		proc = sample;
+	}
+	#endif
 	if (!proc || !sample)
 		return 0;
 
 	delta = proc > sample ? proc - sample : sample - proc;
-	if (delta / proc > 0.01) {
+	if (delta / proc > 0.02) {
+		#if !defined (__PPC__) && !defined (__PPC64__)
 			fprintf(stderr, "Warning: measured timestamp frequency "
 					"%g differs from nominal %g MHz\n",
 					sample, proc);
+		#endif
 			return sample;
 	}
 	return proc;
+#endif
 }

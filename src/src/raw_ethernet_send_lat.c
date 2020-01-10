@@ -54,29 +54,38 @@
 int main(int argc, char *argv[])
 {
 
-	struct ibv_device			*ib_dev = NULL;
+	struct ibv_device		*ib_dev = NULL;
 	struct pingpong_context		ctx;
 	struct raw_ethernet_info	my_dest_info,rem_dest_info;
-	int							ret_parser;
+	int				ret_parser;
 	struct perftest_parameters	user_param;
-	struct ibv_flow				*flow_create_result = NULL;
-	struct ibv_flow_attr		*flow_rules = NULL;
-	struct report_options       report;
+#ifdef HAVE_RAW_ETH_EXP
+	struct ibv_exp_flow		*flow_create_result = NULL;
+	struct ibv_exp_flow_attr	*flow_rules = NULL;
+#else
+	struct ibv_flow		*flow_create_result = NULL;
+	struct ibv_flow_attr	*flow_rules = NULL;
+#endif
+	struct report_options		report;
 
 	//allocate memory space for user parameters
 	memset(&ctx,		0, sizeof(struct pingpong_context));
 	memset(&user_param, 0, sizeof(struct perftest_parameters));
-	memset(&my_dest_info, 0 , sizeof(struct pingpong_dest));
-	memset(&rem_dest_info, 0 , sizeof(struct pingpong_dest));
+	memset(&my_dest_info, 0 , sizeof(struct raw_ethernet_info));
+	memset(&rem_dest_info, 0 , sizeof(struct raw_ethernet_info));
 
 	/* init default values to user's parameters that's relvant for this test:
 	* Raw Ethernet Send Latency Test
 	*/
 	user_param.verb    = SEND;
 	user_param.tst     = LAT;
-	user_param.version = VERSION;
+	strncpy(user_param.version, VERSION, sizeof(user_param.version));
 	user_param.connection_type = RawEth;
 	user_param.r_flag  = &report;
+
+	if (check_flow_steering_support()) {
+            return 1;
+        }
 
 	/* Configure the parameters values according to user
 												arguments or default values. */
@@ -169,7 +178,11 @@ int main(int argc, char *argv[])
 
 
 	//attaching the qp to the spec
+#ifdef HAVE_RAW_ETH_EXP
+	flow_create_result = ibv_exp_create_flow(ctx.qp[0], flow_rules);
+#else
 	flow_create_result = ibv_create_flow(ctx.qp[0], flow_rules);
+#endif
 	if (!flow_create_result){
 		perror("error");
 		fprintf(stderr, "Couldn't attach QP\n");
@@ -179,11 +192,11 @@ int main(int argc, char *argv[])
 	//build ONE Raw Ethernet packets on ctx buffer
 	create_raw_eth_pkt(&user_param,&ctx, &my_dest_info , &rem_dest_info);
 
-	printf(RESULT_LINE); // "---" line
-	// choose the correct format to print
-	// (according  to the test: latency or latency with duration)
-	printf("%s",(user_param.test_type == ITERATIONS) ? RESULT_FMT_LAT :
-														RESULT_FMT_LAT_DUR);
+	if (user_param.output == FULL_VERBOSITY) {
+                printf(RESULT_LINE);
+                printf("%s",(user_param.test_type == ITERATIONS) ? RESULT_FMT_LAT : RESULT_FMT_LAT_DUR);
+                printf((user_param.cpu_util_data.enable ? RESULT_EXT_CPU_UTIL : RESULT_EXT));
+        }
 
 	// Prepare IB resources for rtr(ready to read)/rts(ready to send)
 	if (user_param.work_rdma_cm == OFF) {
@@ -218,7 +231,11 @@ int main(int argc, char *argv[])
 
 
 	//destroy flow
+#ifdef HAVE_RAW_ETH_EXP
+	if (ibv_exp_destroy_flow(flow_create_result)) {
+#else
 	if (ibv_destroy_flow(flow_create_result)) {
+#endif
 		perror("error");
 		fprintf(stderr, "Couldn't Destory flow\n");
 		return FAILURE;

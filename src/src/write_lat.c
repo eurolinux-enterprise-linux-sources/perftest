@@ -54,7 +54,8 @@ int main(int argc, char *argv[]) {
 	int                         ret_parser,i = 0;
 	struct report_options       report;
 	struct pingpong_context     ctx;
-	struct pingpong_dest        my_dest,rem_dest;
+	struct pingpong_dest	    *my_dest  = NULL;
+	struct pingpong_dest	    *rem_dest = NULL;
 	struct ibv_device           *ib_dev;
 	struct perftest_parameters  user_param;
 	struct perftest_comm		user_comm;
@@ -63,13 +64,11 @@ int main(int argc, char *argv[]) {
 	memset(&ctx,0,sizeof(struct pingpong_context));
 	memset(&user_param, 0, sizeof(struct perftest_parameters));
 	memset(&user_comm,0,sizeof(struct perftest_comm));
-	memset(&my_dest,0,sizeof(struct pingpong_dest));
-	memset(&rem_dest,0,sizeof(struct pingpong_dest));
 
 	user_param.verb    = WRITE;
 	user_param.tst     = LAT;
 	user_param.r_flag  = &report;
-	user_param.version = VERSION;
+	strncpy(user_param.version, VERSION, sizeof(user_param.version));
 
 	// Configure the parameters values according to user arguments or defalut values.
 	ret_parser = parser(&user_param,argv,argc);
@@ -79,10 +78,14 @@ int main(int argc, char *argv[]) {
 		return FAILURE;
 	}
 
+	if(user_param.use_xrc || user_param.connection_type == DC) {
+		user_param.num_of_qps *= 2;
+	}
+
 	// Finding the IB device selected (or defalut if no selected).
 	ib_dev = ctx_find_dev(user_param.ib_devname);
 	if (!ib_dev) {
-		fprintf(stderr," Unable to find the Infiniband/RoCE deivce\n");
+		fprintf(stderr," Unable to find the Infiniband/RoCE device\n");
 		return FAILURE;
 	}
 
@@ -94,7 +97,33 @@ int main(int argc, char *argv[]) {
 	}
 
 	// See if MTU and link type are valid and supported.
-	if (check_link_and_mtu(ctx.context,&user_param)) {
+	if (check_link(ctx.context,&user_param)) {
+		fprintf(stderr, " Couldn't get context for the device\n");
+		return FAILURE;
+	}
+
+	// copy the relevant user parameters to the comm struct + creating rdma_cm resources.
+	if (create_comm_struct(&user_comm,&user_param)) {
+		fprintf(stderr," Unable to create RDMA_CM resources\n");
+		return 1;
+	}
+
+	if (user_param.output == FULL_VERBOSITY && user_param.machine == SERVER) {
+		printf("\n************************************\n");
+		printf("* Waiting for client to connect... *\n");
+		printf("************************************\n");
+	}
+
+	// Initialize the connection and print the local data.
+	if (establish_connection(&user_comm)) {
+		fprintf(stderr," Unable to init the socket connection\n");
+		return FAILURE;
+	}
+
+	exchange_versions(&user_comm, &user_param);
+
+	// See if MTU and link type are valid and supported.
+	if (check_mtu(ctx.context,&user_param, &user_comm)) {
 		fprintf(stderr, " Couldn't get context for the device\n");
 		return FAILURE;
 	}
@@ -102,32 +131,28 @@ int main(int argc, char *argv[]) {
 	// Print basic test information.
 	ctx_print_test_info(&user_param);
 
+	ALLOCATE(my_dest , struct pingpong_dest , user_param.num_of_qps);
+	memset(my_dest, 0, sizeof(struct pingpong_dest)*user_param.num_of_qps);
+	ALLOCATE(rem_dest , struct pingpong_dest , user_param.num_of_qps);
+	memset(rem_dest, 0, sizeof(struct pingpong_dest)*user_param.num_of_qps);
+
 	// Allocating arrays needed for the test.
 	alloc_ctx(&ctx,&user_param);
-
-	// copy the rellevant user parameters to the comm struct + creating rdma_cm resources.
-	if (create_comm_struct(&user_comm,&user_param)) {
-		fprintf(stderr," Unable to create RDMA_CM resources\n");
-		return 1;
-	}
 
 	// Create (if nessacery) the rdma_cm ids and channel.
 	if (user_param.work_rdma_cm == ON) {
 
-		if (create_rdma_resources(&ctx,&user_param)) {
-			fprintf(stderr," Unable to create the rdma_resources\n");
-			return FAILURE;
-	    }
-
 		if (user_param.machine == CLIENT) {
-
-			if (rdma_client_connect(&ctx,&user_param)) {
+			if (retry_rdma_connect(&ctx,&user_param)) {
 				fprintf(stderr,"Unable to perform rdma_client function\n");
 				return FAILURE;
 			}
 
 		} else {
-
+    		if (create_rdma_resources(&ctx,&user_param)) {
+				fprintf(stderr," Unable to create the rdma_resources\n");
+				return FAILURE;
+    		}
 			if (rdma_server_connect(&ctx,&user_param)) {
 				fprintf(stderr,"Unable to perform rdma_client function\n");
 				return FAILURE;
@@ -144,46 +169,53 @@ int main(int argc, char *argv[]) {
 	}
 
 	// Set up the Connection.
-	if (set_up_connection(&ctx,&user_param,&my_dest)) {
+	if (set_up_connection(&ctx,&user_param,my_dest)) {
 		fprintf(stderr," Unable to set up socket connection\n");
 		return 1;
 	}
 
-	ctx_print_pingpong_data(&my_dest,&user_comm);
-
-	// Init the connection and print the local data.
-	if (establish_connection(&user_comm)) {
-		fprintf(stderr," Unable to init the socket connection\n");
-		return 1;
-	}
+	for (i=0; i < user_param.num_of_qps; i++)
+		ctx_print_pingpong_data(&my_dest[i],&user_comm);
 
 	// shaking hands and gather the other side info.
-	if (ctx_hand_shake(&user_comm,&my_dest,&rem_dest)) {
-		fprintf(stderr,"Failed to exchange date between server and clients\n");
+	if (ctx_hand_shake(&user_comm,my_dest,rem_dest)) {
+		fprintf(stderr,"Failed to exchange data between server and clients\n");
 		return 1;
 	}
 
 	user_comm.rdma_params->side = REMOTE;
-	ctx_print_pingpong_data(&rem_dest,&user_comm);
+	for (i=0; i < user_param.num_of_qps; i++) {
+
+		// shaking hands and gather the other side info.
+		if (ctx_hand_shake(&user_comm,&my_dest[i],&rem_dest[i])) {
+			fprintf(stderr,"Failed to exchange data between server and clients\n");
+			return 1;
+		}
+
+		ctx_print_pingpong_data(&rem_dest[i],&user_comm);
+	};
 
 	if (user_param.work_rdma_cm == OFF) {
 
-		if (ctx_connect(&ctx,&rem_dest,&user_param,&my_dest)) {
+		if (ctx_connect(&ctx,rem_dest,&user_param,my_dest)) {
 			fprintf(stderr," Unable to Connect the HCA's through the link\n");
 			return 1;
 		}
 	}
 
 	// An additional handshake is required after moving qp to RTR.
-	if (ctx_hand_shake(&user_comm,&my_dest,&rem_dest)) {
-        fprintf(stderr,"Failed to exchange date between server and clients\n");
+	if (ctx_hand_shake(&user_comm,my_dest,rem_dest)) {
+        fprintf(stderr,"Failed to exchange data between server and clients\n");
         return 1;
     }
 
-	ctx_set_send_wqes(&ctx,&user_param,&rem_dest);
+	ctx_set_send_wqes(&ctx,&user_param,rem_dest);
 
-	printf(RESULT_LINE);
-	printf("%s",(user_param.test_type == ITERATIONS) ? RESULT_FMT_LAT : RESULT_FMT_LAT_DUR);
+	if (user_param.output == FULL_VERBOSITY) {
+		printf(RESULT_LINE);
+		printf("%s",(user_param.test_type == ITERATIONS) ? RESULT_FMT_LAT : RESULT_FMT_LAT_DUR);
+		printf((user_param.cpu_util_data.enable ? RESULT_EXT_CPU_UTIL : RESULT_EXT));
+	}
 
 	if (user_param.test_method == RUN_ALL) {
 
@@ -206,6 +238,8 @@ int main(int argc, char *argv[]) {
 		user_param.test_type == ITERATIONS ? print_report_lat(&user_param) : print_report_lat_duration(&user_param);
 	}
 
-	printf(RESULT_LINE);
+	if (user_param.output == FULL_VERBOSITY) {
+		printf(RESULT_LINE);
+	}
 	return 0;
 }

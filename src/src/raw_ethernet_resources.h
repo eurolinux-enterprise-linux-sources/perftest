@@ -29,6 +29,7 @@
 #define PRINT_ON (1)
 #define PRINT_OFF (0)
 #define UDP_PROTOCOL (0x11)
+#define TCP_PROTOCOL (0x06)
 #define IP_HEADER_LEN (20)
 #define DEFAULT_TTL (128)
 
@@ -77,12 +78,31 @@ struct UDP_header {
 	u_short	uh_sum;			/* udp checksum */
 }__attribute__((packed));
 
+struct TCP_header {
+       uint16_t        th_sport;               /* source port */
+       uint16_t        th_dport;               /* destination port */
+       uint32_t        th_seq;
+       uint32_t        th_ack;
+       uint8_t         th_rsv:4;
+       uint8_t         th_doff:4;
+       uint8_t         th_falgs;
+       uint16_t        th_window;
+       uint16_t        th_check;
+       uint16_t        th_urgptr;
+}__attribute__((packed));
+
 void gen_eth_header(struct ETH_header* eth_header,uint8_t* src_mac,uint8_t* dst_mac, uint16_t eth_type);
-void print_spec(struct ibv_flow_attr* flow_rules,struct perftest_parameters* user_parm);
+#ifdef HAVE_RAW_ETH_EXP
+void print_spec(struct ibv_exp_flow_attr* flow_rules,struct perftest_parameters* user_param);
+#else
+void print_spec(struct ibv_flow_attr* flow_rules,struct perftest_parameters* user_param);
+#endif
 void print_ethernet_header(struct ETH_header* p_ethernet_header);
 void print_ip_header(struct IP_V4_header* ip_header);
 void print_udp_header(struct UDP_header* udp_header);
 void print_pkt(void* pkt,struct perftest_parameters *user_param);
+
+int check_flow_steering_support();
 
 /* build_pkt_on_buffer
  * Description: build single Ethernet packet on ctx buffer
@@ -137,16 +157,20 @@ int calc_flow_rules_size(int is_ip_header,int is_udp_header);
  *	Parameters:
  *				flow_rules - Pointer to output, is set to header buffer and specification information
  *				ctx - Test Context.
- *				user_parm - user_parameters struct for this test
+ *				user_param - user_parameters struct for this test
  *				my_dest_info - ethernet information of me
  *				rem_dest_info - ethernet information of the remote
  *
 */
 
 int send_set_up_connection(
+#ifdef HAVE_RAW_ETH_EXP
+	struct ibv_exp_flow_attr **flow_rules,
+#else
 	struct ibv_flow_attr **flow_rules,
+#endif
 	struct pingpong_context *ctx,
-	struct perftest_parameters *user_parm,
+	struct perftest_parameters *user_param,
 	struct raw_ethernet_info* my_dest_info,
 	struct raw_ethernet_info* rem_dest_info);
 
@@ -160,7 +184,7 @@ int send_set_up_connection(
  * 		daddr - destination IP address of the packet(network order)
  * 		sizePkt - size of the packet
  */
-void gen_ip_header(void* ip_header_buff,uint32_t* saddr ,uint32_t* daddr,uint8_t protocol,int sizePkt);
+void gen_ip_header(void* ip_header_buff,uint32_t* saddr ,uint32_t* daddr,uint8_t protocol,int sizePkt, int tos);
 
 /* gen_udp_header .
 
@@ -176,6 +200,17 @@ void gen_ip_header(void* ip_header_buff,uint32_t* saddr ,uint32_t* daddr,uint8_t
  */
 void gen_udp_header(void* UDP_header_buffer,int* sPort ,int* dPort,uint32_t saddr,uint32_t daddr,int sizePkt);
 
+/* gen_udp_header .
+
+ * Description :create UDP header on buffer
+ *
+ * Parameters :
+ * 		TCP_header_buffer - Pointer to output
+ *		sPort - source TCP port of the packet
+ *		dPort -destination TCP port of the packet
+ */
+void gen_tcp_header(void* TCP_header_buffer,int* sPort ,int* dPort);
+
 /* run_iter_fw
  *
  * Description :
@@ -186,7 +221,7 @@ void gen_udp_header(void* UDP_header_buffer,int* sPort ,int* dPort,uint32_t sadd
  * Parameters :
  *
  *  ctx     - Test Context.
- *  user_parm  - user_parameters struct for this test.
+ *  user_param  - user_parameters struct for this test.
  */
 int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_param);
 

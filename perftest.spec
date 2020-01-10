@@ -1,15 +1,14 @@
 Name:		perftest
 Summary:	IB Performance Tests
-Version:	2.0
-Release:	2%{?dist}
+Version:	2.2
+Release:	1%{?dist}
 License:	GPLv2 or BSD
 Group:		Productivity/Networking/Diagnostic
-Source:		http://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-0.52.g49ac91c.tar.gz
-Patch0:		perftest-2.0-cflags.patch
+Source:		http://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-0.19.g1fec59d.tar.gz
 Url:		http://www.openfabrics.org
 BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
-BuildRequires:	libibverbs-devel > 1.1.4, librdmacm-devel > 1.0.14
-BuildRequires:	libibumad-devel > 1.3.6
+BuildRequires:	libibverbs-devel > 1.1.7, librdmacm-devel > 1.0.17
+BuildRequires:	libibumad-devel > 1.3.8
 BuildRequires:	libtool, automake, autoconf
 Obsoletes:	openib-perftest <= 1.2
 ExcludeArch:	s390 s390x
@@ -22,10 +21,8 @@ RDMA networks.
 
 %prep
 %setup -q
-%patch0 -p1 -b .cflags
 
 %build
-./autogen.sh
 %configure
 make %{?_smp_mflags} V=1
 
@@ -52,6 +49,10 @@ rm -rf %{buildroot}
 %_bindir/*
 
 %changelog
+* Wed Jun 18 2014 Doug Ledford <dledford@redhat.com> - 2.2-1
+- Update to latest upstream release
+- Related: bz830099
+
 * Tue Sep 03 2013 Doug Ledford <dledford@redhat.com> - 2.0-2
 - Fix rpmdiff detected error.  Upstream overrode our cflags so stack
   protector got turned off.

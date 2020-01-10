@@ -54,13 +54,19 @@
  ******************************************************************************/
 int main(int argc, char *argv[]) {
 
-	struct ibv_device			*ib_dev = NULL;
+	struct ibv_device		*ib_dev = NULL;
 	struct pingpong_context		ctx;
 	struct raw_ethernet_info	my_dest_info,rem_dest_info;
-	int							ret_parser;
+	int				ret_parser;
 	struct perftest_parameters	user_param;
-	struct ibv_flow				*flow_create_result = NULL;
+
+#ifdef HAVE_RAW_ETH_EXP
+	struct ibv_exp_flow		*flow_create_result = NULL;
+	struct ibv_exp_flow_attr	*flow_rules = NULL;
+#else
+	struct ibv_flow			*flow_create_result = NULL;
 	struct ibv_flow_attr		*flow_rules = NULL;
+#endif	
 
 	/* init default values to user's parameters */
 	memset(&ctx, 0,sizeof(struct pingpong_context));
@@ -70,8 +76,12 @@ int main(int argc, char *argv[]) {
 
 	user_param.verb    = SEND;
 	user_param.tst     = BW;
-	user_param.version = VERSION;
+	strncpy(user_param.version, VERSION, sizeof(user_param.version));
 	user_param.connection_type = RawEth;
+
+	if (check_flow_steering_support()) {
+	    return 1;
+	}
 
 	ret_parser = parser(&user_param,argv,argc);
 
@@ -82,10 +92,13 @@ int main(int argc, char *argv[]) {
 		DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
 		return 1;
 	}
+
+	if (user_param.use_rss)
+		user_param.num_of_qps = 3; //parent rss and 2 child_rx
 	// Finding the IB device selected (or default if no selected).
 	ib_dev = ctx_find_dev(user_param.ib_devname);
 	if (!ib_dev) {
-		fprintf(stderr," Unable to find the Infiniband/RoCE deivce\n");
+		fprintf(stderr," Unable to find the Infiniband/RoCE device\n");
 		DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
  		return 1;
 	}
@@ -148,7 +161,11 @@ int main(int argc, char *argv[]) {
 
 	//attaching the qp to the spec
 	if(user_param.machine == SERVER || user_param.duplex) {
+	#ifdef HAVE_RAW_ETH_EXP
+		flow_create_result = ibv_exp_create_flow(ctx.qp[0], flow_rules);
+	#else
 		flow_create_result = ibv_create_flow(ctx.qp[0], flow_rules);
+	#endif
 		if (!flow_create_result){
 			perror("error");
 			fprintf(stderr, "Couldn't attach QP\n");
@@ -161,9 +178,14 @@ int main(int argc, char *argv[]) {
 		create_raw_eth_pkt(&user_param,&ctx, &my_dest_info , &rem_dest_info);
 	}
 
-	printf(RESULT_LINE);//change the printing of the test
-	printf((user_param.report_fmt == MBS ? RESULT_FMT : RESULT_FMT_G));
-
+	if (user_param.output == FULL_VERBOSITY) {
+                printf(RESULT_LINE);
+		if (user_param.raw_qos)
+			printf((user_param.report_fmt == MBS ? RESULT_FMT_QOS : RESULT_FMT_G_QOS));
+		else
+			printf((user_param.report_fmt == MBS ? RESULT_FMT : RESULT_FMT_G));
+		printf((user_param.cpu_util_data.enable ? RESULT_EXT_CPU_UTIL : RESULT_EXT));
+	}
 	// Prepare IB resources for rtr/rts.
 	if (user_param.work_rdma_cm == OFF) {
 		if (ctx_connect(&ctx,NULL,&user_param,NULL)) {
@@ -172,53 +194,84 @@ int main(int argc, char *argv[]) {
 			return 1;
 		}
 	}
+	if (user_param.test_method == RUN_REGULAR) {
+		if (user_param.machine == CLIENT || user_param.duplex) {
+			ctx_set_send_wqes(&ctx,&user_param,NULL);
+		}
 
-	if (user_param.machine == CLIENT || user_param.duplex) {
-		ctx_set_send_wqes(&ctx,&user_param,NULL);
-	}
+		if (user_param.machine == SERVER || user_param.duplex) {
+			if (ctx_set_recv_wqes(&ctx,&user_param)) {
+				fprintf(stderr," Failed to post receive recv_wqes\n");
+				DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
+				return 1;
+			}
+		}
 
-	if (user_param.machine == SERVER || user_param.duplex) {
-		if (ctx_set_recv_wqes(&ctx,&user_param)) {
-			fprintf(stderr," Failed to post receive recv_wqes\n");
-			DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
-			return 1;
+		if (user_param.mac_fwd) {
+
+			if(run_iter_fw(&ctx,&user_param)) {
+				DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
+				return FAILURE;
+			}
+
+		} else if (user_param.duplex) {
+
+			if(run_iter_bi(&ctx,&user_param)) {
+				DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
+				return FAILURE;
+			}
+
+		} else if (user_param.machine == CLIENT) {
+
+			if(run_iter_bw(&ctx,&user_param)) {
+				DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
+				return FAILURE;
+			}
+
+		} else {
+
+			if(run_iter_bw_server(&ctx,&user_param)) {
+				DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
+				return 17;
+			}
+		}
+
+		print_report_bw(&user_param,NULL);
+	} else if (user_param.test_method == RUN_INFINITELY) {
+
+		if (user_param.machine == CLIENT)
+			ctx_set_send_wqes(&ctx,&user_param,NULL);
+
+		else if (user_param.machine == SERVER) {
+
+			if (ctx_set_recv_wqes(&ctx,&user_param)) {
+				fprintf(stderr," Failed to post receive recv_wqes\n");
+				return 1;
+			}
+		}
+
+		if (user_param.machine == CLIENT) {
+
+			if(run_iter_bw_infinitely(&ctx,&user_param)) {
+				fprintf(stderr," Error occured while running infinitely! aborting ...\n");
+				return 1;
+			}
+
+		} else if (user_param.machine == SERVER) {
+
+			if(run_iter_bw_infinitely_server(&ctx,&user_param)) {
+				fprintf(stderr," Error occured while running infinitely on server! aborting ...\n");
+				return 1;
+			}
 		}
 	}
-
-	if (user_param.mac_fwd) {
-
-		if(run_iter_fw(&ctx,&user_param)) {
-			DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
-			return FAILURE;
-		}
-
-	} else if (user_param.duplex) {
-
-		if(run_iter_bi(&ctx,&user_param)) {
-			DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
-			return FAILURE;
-		}
-
-	} else if (user_param.machine == CLIENT) {
-
-		if(run_iter_bw(&ctx,&user_param)) {
-			DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
-			return FAILURE;
-		}
-
-	} else {
-
-		if(run_iter_bw_server(&ctx,&user_param)) {
-			DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
-			return 17;
-		}
-	}
-
-	print_report_bw(&user_param);
 
 	if(user_param.machine == SERVER || user_param.duplex) {
-
+	#ifdef HAVE_RAW_ETH_EXP
+		if (ibv_exp_destroy_flow(flow_create_result)) {
+	#else
 		if (ibv_destroy_flow(flow_create_result)) {
+	#endif
 			perror("error");
 			fprintf(stderr, "Couldn't Destory flow\n");
 			return FAILURE;
@@ -231,14 +284,13 @@ int main(int argc, char *argv[]) {
 		DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
 		return 1;
 	}
-
 	//limit verifier
-	//TODO: check which value should I return
-	if ( !(user_param.is_msgrate_limit_passed && user_param.is_bw_limit_passed) )
-		return 1;
+	if (!user_param.is_bw_limit_passed && (user_param.is_limit_bw == ON ) ) {
+                fprintf(stderr,"Error: BW result is below bw limit\n");
+                return 1;
+        }
 
 	printf(RESULT_LINE);
 	DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
 	return 0;
 }
-

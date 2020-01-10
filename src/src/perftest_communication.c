@@ -21,9 +21,36 @@
 static const char *sideArray[]  = {"local", "remote"};
 static const char *gidArray[]   = {"GID"  , "MGID"};
 
+static inline int ipv6_addr_v4mapped(const struct in6_addr *a)
+{
+	return ((a->s6_addr32[0] | a->s6_addr32[1]) |
+		(a->s6_addr32[2] ^ htonl(0x0000ffff))) == 0UL ||
+		/* IPv4 encoded multicast addresses */
+		(a->s6_addr32[0] == htonl(0xff0e0000) &&
+		((a->s6_addr32[1] |
+		(a->s6_addr32[2] ^ htonl(0x0000ffff))) == 0UL));
+}
+
+
 /******************************************************************************
  *
  ******************************************************************************/
+
+double bswap_double(double x) {
+	union {
+	    double ddata;
+	    uint64_t u64data;
+	} d1, d2;
+
+	d1.ddata = x;
+	d2.u64data = bswap_64(d1.u64data);
+	return d2.ddata;
+}
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+
 
 static int post_one_recv_wqe(struct pingpong_context *ctx) {
 
@@ -126,7 +153,7 @@ static int send_qp_num_for_ah(struct pingpong_context *ctx,
  *
  ******************************************************************************/
 static int create_ah_from_wc_recv(struct pingpong_context *ctx,
-								  struct perftest_parameters *user_parm) {
+								  struct perftest_parameters *user_param) {
 
     struct ibv_qp_attr attr;
     struct ibv_qp_init_attr init_attr;
@@ -141,12 +168,13 @@ static int create_ah_from_wc_recv(struct pingpong_context *ctx,
 	}
 
 	ctx->ah[0] = ibv_create_ah_from_wc(ctx->pd,&wc,(struct ibv_grh*)ctx->buf,ctx->cm_id->port_num);
-    user_parm->rem_ud_qpn = ntohl(wc.imm_data);
+    user_param->rem_ud_qpn = ntohl(wc.imm_data);
 	ibv_query_qp(ctx->qp[0],&attr, IBV_QP_QKEY,&init_attr);
-    user_parm->rem_ud_qkey = attr.qkey;
+    user_param->rem_ud_qkey = attr.qkey;
 
 	return 0;
 }
+
 
 /******************************************************************************
  *
@@ -161,7 +189,7 @@ static int ethernet_write_keys(struct pingpong_dest *my_dest,
 
 
 		sprintf(msg,KEY_PRINT_FMT,my_dest->lid,my_dest->out_reads,
-				my_dest->qpn,my_dest->psn, my_dest->rkey, my_dest->vaddr);
+				my_dest->qpn,my_dest->psn, my_dest->rkey, my_dest->vaddr, my_dest->srqn);
 
 		if (write(comm->rdma_params->sockfd,msg,sizeof msg) != sizeof msg) {
 			perror("client write");
@@ -180,7 +208,8 @@ static int ethernet_write_keys(struct pingpong_dest *my_dest,
 				my_dest->gid.raw[8],my_dest->gid.raw[9],
 				my_dest->gid.raw[10],my_dest->gid.raw[11],
 				my_dest->gid.raw[12],my_dest->gid.raw[13],
-				my_dest->gid.raw[14],my_dest->gid.raw[15]);
+				my_dest->gid.raw[14],my_dest->gid.raw[15],
+				my_dest->srqn);
 
 		if (write(comm->rdma_params->sockfd, msg, sizeof msg) != sizeof msg) {
 			perror("client write");
@@ -199,21 +228,21 @@ static int ethernet_write_keys(struct pingpong_dest *my_dest,
 static int ethernet_read_keys(struct pingpong_dest *rem_dest,
 							  struct perftest_comm *comm)  {
 
-if (comm->rdma_params->gid_index == -1){
+	if (comm->rdma_params->gid_index == -1) {
 
         int parsed;
 		char msg[KEY_MSG_SIZE];
 
 		if (read(comm->rdma_params->sockfd, msg, sizeof msg) != sizeof msg) {
-			perror("pp_read_keys");
-			fprintf(stderr, "Couldn't read remote address\n");
+			fprintf(stderr, "ethernet_read_keys: Couldn't read remote address\n");
 			return 1;
 		}
 
 		parsed = sscanf(msg,KEY_PRINT_FMT,(unsigned int*)&rem_dest->lid,
 						&rem_dest->out_reads,&rem_dest->qpn,
-						&rem_dest->psn, &rem_dest->rkey,&rem_dest->vaddr);
-		if (parsed != 6) {
+						&rem_dest->psn, &rem_dest->rkey,&rem_dest->vaddr,&rem_dest->srqn);
+
+		if (parsed != 7) {
 			fprintf(stderr, "Couldn't parse line <%.*s>\n",(int)sizeof msg, msg);
 			return 1;
 		}
@@ -226,8 +255,7 @@ if (comm->rdma_params->gid_index == -1){
 		int i;
 
 		if (read(comm->rdma_params->sockfd, msg, sizeof msg) != sizeof msg) {
-			perror("pp_read_keys");
-			fprintf(stderr, "Couldn't read remote address\n");
+			fprintf(stderr, "ethernet_read_keys: Couldn't read remote address\n");
 			return 1;
 		}
 
@@ -281,6 +309,14 @@ if (comm->rdma_params->gid_index == -1){
 		strcpy(tmp, pstr);
 		rem_dest->gid.raw[15] = (unsigned char)strtoll(tmp, NULL, 16);
 
+
+		pstr += term - pstr + 4;
+
+		term = strpbrk(pstr, ":");
+		memcpy(tmp, pstr, term - pstr);
+		tmp[term - pstr] = 0;
+		rem_dest->srqn = (unsigned)strtoul(tmp, NULL, 16); // SRQN
+
 	}
 	return 0;
 }
@@ -297,11 +333,29 @@ static int rdma_write_keys(struct pingpong_dest *my_dest,
 	struct ibv_wc wc;
 	int ne;
 
-	memcpy(comm->rdma_ctx->buf,my_dest,sizeof(struct pingpong_dest));
+#ifdef HAVE_ENDIAN
+	int i;
+	struct pingpong_dest m_my_dest;
 
+	m_my_dest.lid 		= htobe32(my_dest->lid);
+	m_my_dest.out_reads 	= htobe32(my_dest->out_reads);
+	m_my_dest.qpn 		= htobe32(my_dest->qpn);
+	m_my_dest.psn 		= htobe32(my_dest->psn);
+	m_my_dest.rkey 		= htobe32(my_dest->rkey);
+	m_my_dest.vaddr		= htobe64(my_dest->vaddr);
+
+	for(i=0; i<16; i++) {
+		m_my_dest.gid.raw[i] = my_dest->gid.raw[i];
+	}
+
+	memcpy(comm->rdma_ctx->buf, &m_my_dest, sizeof(struct pingpong_dest));
+#else
+	memcpy(comm->rdma_ctx->buf, &my_dest, sizeof(struct pingpong_dest));
+#endif
 	list.addr   = (uintptr_t)comm->rdma_ctx->buf;
 	list.length = sizeof(struct pingpong_dest);
 	list.lkey   = comm->rdma_ctx->mr->lkey;
+
 
 	wr.wr_id      = SYNC_SPEC_ID;
 	wr.sg_list    = &list;
@@ -333,6 +387,9 @@ static int rdma_write_keys(struct pingpong_dest *my_dest,
 static int rdma_read_keys(struct pingpong_dest *rem_dest,
 						  struct perftest_comm *comm) {
 
+#ifdef HAVE_ENDIAN
+	struct pingpong_dest a_rem_dest;
+#endif
 	struct ibv_wc wc;
 	int ne;
 
@@ -345,7 +402,19 @@ static int rdma_read_keys(struct pingpong_dest *rem_dest,
 		return 1;
 	}
 
-	memcpy(rem_dest,comm->rdma_ctx->buf,sizeof(struct pingpong_dest));
+	#ifdef HAVE_ENDIAN
+        memcpy(&a_rem_dest,comm->rdma_ctx->buf,sizeof(struct pingpong_dest));
+        rem_dest->lid   = ntohl(a_rem_dest.lid);
+        rem_dest->out_reads     = ntohl(a_rem_dest.out_reads);
+        rem_dest->qpn   = ntohl(a_rem_dest.qpn);
+        rem_dest->psn   = ntohl(a_rem_dest.psn);
+        rem_dest->rkey  = ntohl(a_rem_dest.rkey);
+
+        rem_dest->vaddr         = be64toh(a_rem_dest.vaddr);
+        memcpy(rem_dest->gid.raw, &(a_rem_dest.gid), 16*sizeof(uint8_t));
+	#else
+		memcpy(&rem_dest,comm->rdma_ctx->buf,sizeof(struct pingpong_dest));
+	#endif
 
 	if (post_one_recv_wqe(comm->rdma_ctx)) {
 		fprintf(stderr, "Couldn't post send \n");
@@ -457,31 +526,90 @@ int set_up_connection(struct pingpong_context *ctx,
 					  struct perftest_parameters *user_param,
 					  struct pingpong_dest *my_dest) {
 
+	int num_of_qps = user_param->num_of_qps;
+	int num_of_qps_per_port = user_param->num_of_qps / 2;
+
 	int i;
+	int is_ipv4;
+
 	union ibv_gid temp_gid;
 	union ibv_gid temp_gid2;
+	struct ibv_port_attr attr;
 
 	srand48(getpid() * time(NULL));
 
+	//in xrc with bidirectional,
+	//there are send qps and recv qps. the actual number of send/recv qps
+	//is num_of_qps / 2.
+	if ( (user_param->connection_type == DC || user_param->use_xrc) && (user_param->duplex || user_param->tst == LAT)) {
+		num_of_qps /= 2;
+		num_of_qps_per_port = num_of_qps / 2;
+	}
+
 	if (user_param->gid_index != -1) {
-		if (ibv_query_gid(ctx->context,user_param->ib_port,user_param->gid_index,&temp_gid)) {
-			return -1;
+        	if (ibv_query_port(ctx->context,user_param->ib_port,&attr))
+	                return 0;
+
+		if (user_param->use_gid_user)
+		{
+			if (ibv_query_gid(ctx->context,user_param->ib_port,user_param->gid_index,&temp_gid)) {
+                                return -1;
+                        }
+		}
+		else
+		{
+			for (i=0 ; i < attr.gid_tbl_len; i++) {
+				if (ibv_query_gid(ctx->context,user_param->ib_port,i,&temp_gid)) {	
+					return -1;
+				}
+				is_ipv4 = ipv6_addr_v4mapped((struct in6_addr *)temp_gid.raw);
+				if ( (user_param->ipv6 && !is_ipv4) || (!user_param->ipv6 && is_ipv4) )
+				{
+					user_param->gid_index = i;
+					break;
+				}
+			}
 		}
 	}
 
-	if (user_param->dualport==ON) { //dual port case
-		if (user_param->gid_index2 != -1) {
+	if (user_param->dualport==ON)  //dual port case
+	{
+		if (user_param->gid_index2 != -1)
+		{
+			if (ibv_query_port(ctx->context,user_param->ib_port2,&attr))
+				return 0;
+
+			if (user_param->use_gid_user)
+			{
 				if (ibv_query_gid(ctx->context,user_param->ib_port2,user_param->gid_index,&temp_gid2)) {
 					return -1;
 				}
 			}
+			else
+			{
+				for (i=0 ; i < attr.gid_tbl_len; i++) {
+					if (ibv_query_gid(ctx->context,user_param->ib_port2,i,&temp_gid2)) {
+						return -1;
+					}
+					is_ipv4 = ipv6_addr_v4mapped((struct in6_addr *)temp_gid2.raw);
+					if ( (user_param->ipv6 && !is_ipv4) || (!user_param->ipv6 && is_ipv4) )
+					{
+						user_param->gid_index = i;
+						break;
+					}
+				}
+			}
+		}
 	}
 
 	for (i = 0; i < user_param->num_of_qps; i++) {
 
 		if (user_param->dualport == ON) {
 			// first half of qps are for ib_port and second half are for ib_port2
-			if (i < user_param->num_of_qps / 2) {
+			// in xrc with bidirectional, the first half of qps are xrc_send qps and
+			// the second half are xrc_recv qps. the first half of the send/recv qps
+			// are for ib_port1 and the second half are for ib_port2
+			if (i % num_of_qps < num_of_qps_per_port) {
 				my_dest[i].lid   = ctx_get_local_lid(ctx->context,user_param->ib_port);
 
 			} else {
@@ -502,7 +630,7 @@ int set_up_connection(struct pingpong_context *ctx,
 
 		if (user_param->dualport==ON) {
 
-			if (i < user_param->num_of_qps / 2)
+			if (i % num_of_qps < num_of_qps_per_port)
 				memcpy(my_dest[i].gid.raw,temp_gid.raw ,16);
 
 			else {
@@ -521,6 +649,29 @@ int set_up_connection(struct pingpong_context *ctx,
 		}
 	}
 
+	#ifdef HAVE_XRCD
+	if (user_param->use_xrc) {
+		for (i=0; i < user_param->num_of_qps; i++) {
+			if (ibv_get_srq_num(ctx->srq,&(my_dest[i].srqn))) {
+				fprintf(stderr, "Couldn't get SRQ number\n");
+				return 1;
+			}
+		}
+	}
+	#endif
+	
+	#ifdef HAVE_DC
+	if(user_param->machine == SERVER || user_param->duplex || user_param->tst == LAT) {
+		if (user_param->connection_type == DC) {
+			for (i=0; i < user_param->num_of_qps; i++) {
+				if (ibv_get_srq_num(ctx->srq, &(my_dest[i].srqn))) {
+					fprintf(stderr, "Couldn't get SRQ number\n");
+					return 1;
+				}
+			}
+		}
+	}
+	#endif
 	return 0;
 }
 
@@ -634,11 +785,13 @@ int rdma_client_connect(struct pingpong_context *ctx,struct perftest_parameters 
 	}
 
 	memset(&conn_param, 0, sizeof conn_param);
-	if (user_param->verb == READ) {
+	if (user_param->verb == READ || user_param->verb == ATOMIC) {
 		conn_param.responder_resources = user_param->out_reads;
 		conn_param.initiator_depth = user_param->out_reads;
 	}
 	user_param->work_rdma_cm = temp;
+	conn_param.retry_count = user_param->retry_count;
+        conn_param.rnr_retry_count = 7;
 
 	if (user_param->work_rdma_cm == OFF) {
 
@@ -659,7 +812,8 @@ int rdma_client_connect(struct pingpong_context *ctx,struct perftest_parameters 
 	}
 
 	if (event->event != RDMA_CM_EVENT_ESTABLISHED) {
-		fprintf(stderr, "Unexpected CM event bl blka %d\n",event->event);
+		rdma_ack_cm_event(event);
+		fprintf(stderr, "Unexpected CM event bl blka %d\n", event->event);
 		return FAILURE;
 	}
 
@@ -691,7 +845,33 @@ int rdma_client_connect(struct pingpong_context *ctx,struct perftest_parameters 
 /******************************************************************************
  *
  ******************************************************************************/
-int rdma_server_connect(struct pingpong_context *ctx,
+int retry_rdma_connect(struct pingpong_context *ctx,
+			struct perftest_parameters *user_param) {
+	int i, max_retries = 10;
+	int delay = 100000; /* 100 millisec */
+
+	for (i = 0; i < max_retries; i++) {
+		if (create_rdma_resources(ctx,user_param)) {
+			fprintf(stderr," Unable to create rdma resources\n");
+			return FAILURE;
+	    	}
+		if (rdma_client_connect(ctx,user_param) == SUCCESS)
+			return SUCCESS;
+
+		if (destroy_rdma_resources(ctx,user_param)) {
+			fprintf(stderr,"Unable to destroy rdma resources\n");
+			return FAILURE;
+		}
+		usleep(delay);
+	}
+	fprintf(stderr,"Unable to connect (retries = %d)\n", max_retries);
+	return FAILURE;
+}
+
+/******************************************************************************
++ *
++ ******************************************************************************/
+ int rdma_server_connect(struct pingpong_context *ctx,
 						struct perftest_parameters *user_param) {
 
 	int temp;
@@ -751,13 +931,15 @@ int rdma_server_connect(struct pingpong_context *ctx,
 	}
 
 	memset(&conn_param, 0, sizeof conn_param);
-	if (user_param->verb == READ) {
+	if (user_param->verb == READ || user_param->verb == ATOMIC) {
 		conn_param.responder_resources = user_param->out_reads;
 		conn_param.initiator_depth = user_param->out_reads;
 	}
 	if (user_param->connection_type == UD)
 		conn_param.qp_num = ctx->qp[0]->qp_num;
 
+	conn_param.retry_count = user_param->retry_count;
+	conn_param.rnr_retry_count = 7;
 	user_param->work_rdma_cm = temp;
 
 	if (user_param->work_rdma_cm == OFF) {
@@ -819,7 +1001,10 @@ int create_comm_struct(struct perftest_comm *comm,
 	comm->rdma_params->verb		   = user_param->verb;
 	comm->rdma_params->use_mcg	   = user_param->use_mcg;
 	comm->rdma_params->duplex	   = user_param->duplex;
-	comm->rdma_params->tos             = DEF_TOS;
+	comm->rdma_params->tos         = DEF_TOS;
+	comm->rdma_params->use_xrc	   = user_param->use_xrc;
+	comm->rdma_params->connection_type	= user_param->connection_type;
+        comm->rdma_params->output      = user_param->output;
 
 	if (user_param->use_rdma_cm) {
 
@@ -934,6 +1119,231 @@ int ctx_hand_shake(struct perftest_comm *comm,
 
 
 
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+int ctx_xchg_data_ethernet( struct perftest_comm *comm,
+				   void *my_data,
+				   void *rem_data,int size) {
+
+	if (comm->rdma_params->servername) {
+		if (ethernet_write_data(comm, (char *) my_data, size)) {
+			fprintf(stderr," Unable to write to socket/rdam_cm\n");
+			return 1;
+		}
+
+		if (ethernet_read_data(comm, (char *) rem_data, size)) {
+			fprintf(stderr," Unable to read from socket/rdam_cm\n");
+			return 1;
+		}
+
+	// Server side will wait for the client side to reach the write function.
+	} else {
+
+		if (ethernet_read_data(comm, (char *) rem_data, size)) {
+			fprintf(stderr," Unable to read to socket/rdam_cm\n");
+			return 1;
+		}
+
+		if (ethernet_write_data(comm, (char *) my_data, size)) {
+			fprintf(stderr," Unable to write from socket/rdam_cm\n");
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+int ctx_xchg_data_rdma( struct perftest_comm *comm,
+				   void *my_data,
+				   void *rem_data,int size) {
+
+	if (comm->rdma_params->servername) {
+		if (rdma_write_data(my_data,comm,size)) {
+			fprintf(stderr," Unable to write to socket/rdam_cm\n");
+			return 1;
+		}
+
+		if (rdma_read_data(rem_data,comm,size)) {
+			fprintf(stderr," Unable to read from socket/rdam_cm\n");
+			return 1;
+		}
+
+	// Server side will wait for the client side to reach the write function.
+	} else {
+
+		if (rdma_read_data(rem_data,comm,size)) {
+			fprintf(stderr," Unable to read to socket/rdam_cm\n");
+			return 1;
+		}
+
+		if (rdma_write_data(my_data,comm,size)) {
+			fprintf(stderr," Unable to write from socket/rdam_cm\n");
+			return 1;
+		}
+	}
+	return 0;
+}
+
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+int rdma_read_data(void *data,
+						  struct perftest_comm *comm, int size) {
+
+	struct ibv_wc wc;
+	int ne;
+
+	do {
+		ne = ibv_poll_cq(comm->rdma_ctx->recv_cq,1,&wc);
+	} while (ne == 0);
+
+	if (wc.status || !(wc.opcode & IBV_WC_RECV) || wc.wr_id != SYNC_SPEC_ID) {
+		fprintf(stderr, "Bad wc status -- %d -- %d \n",(int)wc.status,(int)wc.wr_id);
+		return 1;
+	}
+
+	memcpy(data,comm->rdma_ctx->buf,size);
+
+	if (post_one_recv_wqe(comm->rdma_ctx)) {
+		fprintf(stderr, "Couldn't post send \n");
+		return 1;
+	}
+
+	return 0;
+}
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+int rdma_write_data(void *data,
+						   struct perftest_comm *comm, int size) {
+
+	struct ibv_send_wr wr;
+	struct ibv_send_wr *bad_wr;
+	struct ibv_sge list;
+	struct ibv_wc wc;
+	int ne;
+	memcpy(comm->rdma_ctx->buf,data,size);
+
+	list.addr   = (uintptr_t)comm->rdma_ctx->buf;
+	list.length = size;
+	list.lkey   = comm->rdma_ctx->mr->lkey;
+
+	wr.wr_id      = SYNC_SPEC_ID;
+	wr.sg_list    = &list;
+	wr.num_sge    = 1;
+	wr.opcode     = IBV_WR_SEND;
+	wr.send_flags = IBV_SEND_SIGNALED;
+	wr.next       = NULL;
+
+	if (ibv_post_send(comm->rdma_ctx->qp[0],&wr,&bad_wr)) {
+		fprintf(stderr, "Function ibv_post_send failed\n");
+		return 1;
+	}
+
+	do {
+		ne = ibv_poll_cq(comm->rdma_ctx->send_cq, 1,&wc);
+	} while (ne == 0);
+
+	if (wc.status || wc.opcode != IBV_WC_SEND || wc.wr_id != SYNC_SPEC_ID) {
+		fprintf(stderr, " Bad wc status %d\n",(int)wc.status);
+		return 1;
+	}
+
+	return 0;
+}
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+int ethernet_write_data(struct perftest_comm *comm, char *msg, size_t size) {
+
+		if (write(comm->rdma_params->sockfd, msg, size) != size) {
+			perror("client write");
+			fprintf(stderr, "Couldn't send reports\n");
+			return 1;
+		}
+
+    return 0;
+
+}
+/******************************************************************************
+ *
+ ******************************************************************************/
+int ethernet_read_data(struct perftest_comm *comm, char *recv_msg, size_t size) {
+
+	if (read(comm->rdma_params->sockfd, recv_msg, size) != size) {
+		fprintf(stderr, "ethernet_read_data: Couldn't read reports\n");
+		return 1;
+	}
+
+	return 0;
+}
+
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+int ctx_xchg_data( struct perftest_comm *comm,
+				   void *my_data,
+				   void *rem_data,int size) {
+
+	if (comm->rdma_params->use_rdma_cm || comm->rdma_params->work_rdma_cm)
+		ctx_xchg_data_rdma(comm,my_data,rem_data,size);
+	else
+		ctx_xchg_data_ethernet(comm,my_data,rem_data,size);
+
+    return 0;
+}
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+void xchg_bw_reports (struct perftest_comm *comm, struct bw_report_data *my_bw_rep,
+							struct bw_report_data *rem_bw_rep) {
+
+	struct bw_report_data temp;
+
+	temp.size = hton_long(my_bw_rep->size);
+	temp.iters = hton_int(my_bw_rep->iters);
+	temp.bw_peak = hton_double(my_bw_rep->bw_peak);
+	temp.bw_avg = hton_double(my_bw_rep->bw_avg);
+	temp.msgRate_avg = hton_double(my_bw_rep->msgRate_avg);
+
+	/*******************Exchange Reports*******************/
+	if (ctx_xchg_data(comm, (void*) (&temp.size), (void*) (&rem_bw_rep->size), sizeof(unsigned long))) {
+		fprintf(stderr," Failed to exchange data between server and clients\n");
+			exit(1);
+	}
+	if (ctx_xchg_data(comm, (void*) (&temp.iters), (void*) (&rem_bw_rep->iters), sizeof(int))) {
+		fprintf(stderr," Failed to exchange data between server and clients\n");
+		exit(1);
+	}	 
+	if (ctx_xchg_data(comm, (void*) (&temp.bw_peak), (void*) (&rem_bw_rep->bw_peak), sizeof(double))) {
+		fprintf(stderr," Failed to exchange data between server and clients\n");
+		exit(1);
+	}
+	if (ctx_xchg_data(comm, (void*) (&temp.bw_avg), (void*) (&rem_bw_rep->bw_avg), sizeof(double))) {
+		fprintf(stderr," Failed to exchange data between server and clients\n");
+		exit(1);
+	}
+	if (ctx_xchg_data(comm, (void*) (&temp.msgRate_avg), (void*) (&rem_bw_rep->msgRate_avg), sizeof(double))) {
+		fprintf(stderr," Failed to exchange data between server and clients\n");
+		exit(1);
+	}
+
+	rem_bw_rep->size = hton_long(rem_bw_rep->size);
+	rem_bw_rep->iters = hton_int(rem_bw_rep->iters);
+	rem_bw_rep->bw_peak = hton_double(rem_bw_rep->bw_peak);
+	rem_bw_rep->bw_avg = hton_double(rem_bw_rep->bw_avg);
+	rem_bw_rep->msgRate_avg = hton_double(rem_bw_rep->msgRate_avg);
+}
+
 /******************************************************************************
  *
  ******************************************************************************/
@@ -941,15 +1351,25 @@ void ctx_print_pingpong_data(struct pingpong_dest *element,
 							 struct perftest_comm *comm) {
 
 	int is_there_mgid,local_mgid,remote_mgid;
-
+	if (comm->rdma_params->output != FULL_VERBOSITY)
+		return;
 	// First of all we print the basic format.
     printf(BASIC_ADDR_FMT,sideArray[comm->rdma_params->side],element->lid,element->qpn,element->psn);
 
 	switch (comm->rdma_params->verb) {
 		case 2  : printf(READ_FMT,element->out_reads);
 		case 1  : printf(RDMA_FMT,element->rkey,element->vaddr);
-		default : putchar('\n');
+		default : ;
 	}
+
+	if (comm->rdma_params->use_xrc) {
+		printf(XRC_FMT,element->srqn);
+
+	} else if (comm->rdma_params->connection_type == DC){
+		printf(DC_FMT,element->srqn);
+	}
+
+	putchar('\n');
 
 	local_mgid    = (comm->rdma_params->side == 0)  && (comm->rdma_params->machine == 0);
 	remote_mgid   = (comm->rdma_params->side == 1)  && (comm->rdma_params->machine == 1);
@@ -994,6 +1414,76 @@ int ctx_close_connection(struct perftest_comm *comm,
 	}
 
 	return 0;
+}
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+void exchange_versions(struct perftest_comm *user_comm, struct perftest_parameters *user_param) {
+
+	if (!user_param->dont_xchg_versions) {
+		if (ctx_xchg_data(user_comm,(void*)(&user_param->version),(void*)(&user_param->rem_version),sizeof(user_param->rem_version))) {
+			fprintf(stderr," Failed to exchange data between server and clients\n");
+			exit(1);
+		}
+	}
+}
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+int check_mtu(struct ibv_context *context,struct perftest_parameters *user_param, struct perftest_comm *user_comm) {
+	int curr_mtu=0, rem_mtu=0;
+	char cur[2];
+	char rem[2];
+
+	if (user_param->connection_type == RawEth) {
+		if (set_eth_mtu(user_param) != 0 ) {
+			fprintf(stderr, " Couldn't set Eth MTU\n");
+			return FAILURE;
+		}
+	} else {
+		curr_mtu = (int) (set_mtu(context,user_param->ib_port,user_param->mtu));
+		if (!user_param->dont_xchg_versions) {
+			if (strverscmp(user_param->rem_version, "5.1") >= 0) {
+				sprintf(cur,"%d",curr_mtu);
+				if (ctx_xchg_data(user_comm,(void*)(cur),(void*)(rem),sizeof(int))) {
+					fprintf(stderr," Failed to exchange data between server and clients\n");
+					exit(1);
+				}
+				rem_mtu = (int) strtol(rem, (char **)NULL, 10);
+				user_param->curr_mtu = (enum ibv_mtu)((curr_mtu > rem_mtu) ? rem_mtu : curr_mtu);
+			} else {
+				user_param->curr_mtu = (enum ibv_mtu)(curr_mtu);
+			}
+		} else {
+                	user_param->curr_mtu = (enum ibv_mtu)(curr_mtu);
+		}
+	}
+
+	//exchange_mtu(&user_comm, &user_param);
+
+	if (user_param->connection_type == UD && user_param->size > MTU_SIZE(user_param->curr_mtu)) {
+
+		if (user_param->test_method == RUN_ALL) {
+			fprintf(stderr," Max msg size in UD is MTU %lu\n",MTU_SIZE(user_param->curr_mtu));
+			fprintf(stderr," Changing to this MTU\n");
+		}
+		user_param->size = MTU_SIZE(user_param->curr_mtu);
+	}
+	//checking msg size in raw ethernet
+	if (user_param->connection_type == RawEth){
+		if (user_param->size > user_param->curr_mtu) {
+			fprintf(stderr," Max msg size in RawEth is MTU %d\n",user_param->curr_mtu);
+			fprintf(stderr," Changing msg size to this MTU\n");
+			user_param->size = user_param->curr_mtu;
+		} else if (user_param->size < RAWETH_MIN_MSG_SIZE) {
+			printf(" Min msg size for RawEth is 64B - changing msg size to 64 \n");
+			user_param->size = RAWETH_MIN_MSG_SIZE;
+		}
+	}
+
+	return SUCCESS;
 }
 
 /******************************************************************************
