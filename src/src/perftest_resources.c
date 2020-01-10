@@ -9,11 +9,12 @@
 #include <signal.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/mman.h>
 
 #include "perftest_resources.h"
 #include "config.h"
 
-#if defined(HAVE_VERBS_EXP)
+#ifdef HAVE_VERBS_EXP
 static enum ibv_exp_wr_opcode exp_opcode_verbs_array[] = {IBV_EXP_WR_SEND,IBV_EXP_WR_RDMA_WRITE,IBV_EXP_WR_RDMA_READ};
 static enum ibv_exp_wr_opcode exp_opcode_atomic_array[] = {IBV_EXP_WR_ATOMIC_CMP_AND_SWP,IBV_EXP_WR_ATOMIC_FETCH_AND_ADD};
 #endif
@@ -24,28 +25,23 @@ static enum ibv_wr_opcode opcode_atomic_array[] = {IBV_WR_ATOMIC_CMP_AND_SWP,IBV
 
 struct perftest_parameters* duration_param;
 struct check_alive_data check_alive_data;
-int cycle_buffer=4096;
 
 /******************************************************************************
  * Beginning
  ******************************************************************************/
 #ifdef HAVE_CUDA
-#define ASSERT(x)                                                       \
-    do                                                                  \
-        {                                                               \
-            if (!(x))                                                   \
-                {                                                       \
-                    fprintf(stdout, "Assertion \"%s\" failed at %s:%d\n", #x, __FILE__, __LINE__); \
-                    /*exit(EXIT_FAILURE);*/                                 \
-                }                                                       \
-        } while (0)
+#define ASSERT(x)										\
+	do {											\
+	if (!(x)) {										\
+		fprintf(stdout, "Assertion \"%s\" failed at %s:%d\n", #x, __FILE__, __LINE__);	\
+	}											\
+} while (0)
 
-#define CUCHECK(stmt)                           \
-    do                                          \
-        {                                       \
-            CUresult result = (stmt);           \
-            ASSERT(CUDA_SUCCESS == result);     \
-        } while (0)
+#define CUCHECK(stmt)				\
+	do {					\
+	CUresult result = (stmt);		\
+	ASSERT(CUDA_SUCCESS == result);		\
+} while (0)
 
 /*----------------------------------------------------------------------------*/
 
@@ -54,7 +50,6 @@ static CUcontext cuContext;
 
 static int pp_init_gpu(struct pingpong_context *ctx, size_t _size)
 {
-	int ret = 0;
 	const size_t gpu_page_size = 64*1024;
 	size_t size = (_size + gpu_page_size - 1) & ~(gpu_page_size - 1);
 	printf("initializing CUDA\n");
@@ -70,7 +65,7 @@ static int pp_init_gpu(struct pingpong_context *ctx, size_t _size)
 		printf("cuDeviceGetCount() returned %d\n", error);
 		exit(1);
 	}
-	// This function call returns 0 if there are no CUDA capable devices.
+	/* This function call returns 0 if there are no CUDA capable devices. */
 	if (deviceCount == 0) {
 		printf("There are no available device(s) that support CUDA\n");
 		return 1;
@@ -80,15 +75,16 @@ static int pp_init_gpu(struct pingpong_context *ctx, size_t _size)
 		printf("There are %d devices supporting CUDA, picking first...\n", deviceCount);
 
 	int devID = 0;
-	// pick up device with zero ordinal (default, or devID)
+
+	/* pick up device with zero ordinal (default, or devID) */
 	CUCHECK(cuDeviceGet(&cuDevice, devID));
 
-        char name[128];
-        CUCHECK(cuDeviceGetName(name, sizeof(name), devID));
-        printf("[pid = %d, dev = %d] device name = [%s]\n", getpid(), cuDevice, name);
-
+	char name[128];
+	CUCHECK(cuDeviceGetName(name, sizeof(name), devID));
+	printf("[pid = %d, dev = %d] device name = [%s]\n", getpid(), cuDevice, name);
 	printf("creating CUDA Ctx\n");
-	// Create context
+
+	/* Create context */
 	error = cuCtxCreate(&cuContext, CU_CTX_MAP_HOST, cuDevice);
 	if (error != CUDA_SUCCESS) {
 		printf("cuCtxCreate() error=%d\n", error);
@@ -102,15 +98,16 @@ static int pp_init_gpu(struct pingpong_context *ctx, size_t _size)
 		return 1;
 	}
 
-	printf("cuMemAlloc() of a %d bytes GPU buffer\n", size);
+	printf("cuMemAlloc() of a %zd bytes GPU buffer\n", size);
 	CUdeviceptr d_A;
 	error = cuMemAlloc(&d_A, size);
 	if (error != CUDA_SUCCESS) {
 		printf("cuMemAlloc error=%d\n", error);
 		return 1;
 	}
-	printf("allocated GPU buffer address at %016llx pointer=%p\n", d_A, d_A);
-	ctx->buf = (void*)d_A;
+	printf("allocated GPU buffer address at %016llx pointer=%p\n", d_A,
+	       (void *) d_A);
+	ctx->buf[0] = (void*)d_A;
 
 	return 0;
 }
@@ -118,7 +115,7 @@ static int pp_init_gpu(struct pingpong_context *ctx, size_t _size)
 static int pp_free_gpu(struct pingpong_context *ctx)
 {
 	int ret = 0;
-	CUdeviceptr d_A = (CUdeviceptr) ctx->buf;
+	CUdeviceptr d_A = (CUdeviceptr) ctx->buf[0];
 
 	printf("deallocating RX GPU buffer\n");
 	cuMemFree(d_A);
@@ -131,9 +128,38 @@ static int pp_free_gpu(struct pingpong_context *ctx)
 }
 #endif
 
-#if defined(HAVE_VERBS_EXP)
-static void get_verbs_pointers(struct pingpong_context *ctx) {
-	//get verbs pointers
+static int pp_init_mmap(struct pingpong_context *ctx, size_t size,
+			const char *fname, unsigned long offset)
+{
+	int fd = open(fname, O_RDWR);
+	if (fd < 0) {
+		printf("Unable to open '%s': %s\n", fname, strerror(errno));
+		return 1;
+	}
+
+	ctx->buf[0] = mmap(NULL, size, PROT_WRITE | PROT_READ, MAP_SHARED, fd,
+			offset);
+	close(fd);
+
+	if (ctx->buf[0] == MAP_FAILED) {
+		printf("Unable to mmap '%s': %s\n", fname, strerror(errno));
+		return 1;
+	}
+
+	printf("allocated mmap buffer of size %zd at %p\n", size, ctx->buf[0]);
+
+	return 0;
+}
+
+static int pp_free_mmap(struct pingpong_context *ctx)
+{
+	munmap(ctx->buf[0], ctx->buff_size);
+	return 0;
+}
+
+#ifdef HAVE_VERBS_EXP
+static void get_verbs_pointers(struct pingpong_context *ctx)
+{
 	ctx->exp_post_send_func_pointer = ibv_exp_get_provider_func(ctx->context,IBV_EXP_POST_SEND_FUNC);
 	if (!ctx->exp_post_send_func_pointer) {
 		fprintf(stderr, "Couldn't get ibv_exp_post_send pointer\n");
@@ -145,81 +171,83 @@ static void get_verbs_pointers(struct pingpong_context *ctx) {
 		ctx->post_send_func_pointer = &ibv_post_send;
 	}
 	ctx->poll_cq_func_pointer = ibv_exp_get_provider_func(ctx->context,IBV_POLL_CQ_FUNC);
-        if (!ctx->poll_cq_func_pointer) {
-                fprintf(stderr, "Couldn't get ibv_poll_cq pointer\n");
-        }
+	if (!ctx->poll_cq_func_pointer) {
+		fprintf(stderr, "Couldn't get ibv_poll_cq pointer\n");
+	}
 }
 #endif
 
 static int next_word_string(char* input, char* output, int from_index)
 {
-    int i = from_index;
-    int j = 0;
+	int i = from_index;
+	int j = 0;
 
-    while (input[i] != ' ') {
-       	output[j] = input[i];
-       	j++; i++;
-    }
+	while (input[i] != ' ') {
+		output[j] = input[i];
+		j++; i++;
+	}
 
-    output[j]=0;
-    return i+1;
+	output[j]=0;
+	return i+1;
 }
 
 static int get_n_word_string(char *input, char *output,int from_index, int iters)
 {
-    for (;iters > 0; iters--) {
-	from_index = next_word_string(input,output,from_index);
-    }
+	for (;iters > 0; iters--) {
+		from_index = next_word_string(input,output,from_index);
+	}
 
-    return from_index;
+	return from_index;
 }
 static void compress_spaces(char *str, char *dst)
 {
-    for (; *str; ++str) {
-        *dst++ = *str;
+	for (; *str; ++str) {
+		*dst++ = *str;
 
-        if (isspace(*str)) {
-            do ++str;
+		if (isspace(*str)) {
+			do ++str;
 
-            while (isspace(*str));
+			while (isspace(*str));
 
-            --str;
-        }
-    }
+			--str;
+		}
+	}
 
-    *dst = 0;
+	*dst = 0;
 }
 
 static void get_cpu_stats(struct perftest_parameters *duration_param,int stat_index)
 {
-    char* file_name = CPU_UTILITY;
-    FILE *fp;
-    char line[100];
-    char tmp[100];
-    int index=0;
-    fp = fopen(file_name, "r");      //open file , read only
+	char* file_name = CPU_UTILITY;
+	FILE *fp;
+	char line[100];
+	char tmp[100];
+	int index=0;
+	fp = fopen(file_name, "r");
 
-    fgets(line,100,fp);
-    compress_spaces(line,line);
-    index=get_n_word_string(line,tmp,index,2); //skip first word
-    duration_param->cpu_util_data.ustat[stat_index-1] = atoll(tmp);
+	fgets(line,100,fp);
+	compress_spaces(line,line);
+	index=get_n_word_string(line,tmp,index,2); /* skip first word */
+	duration_param->cpu_util_data.ustat[stat_index-1] = atoll(tmp);
 
-    index=get_n_word_string(line,tmp,index,3); //skip 2 stats
-    duration_param->cpu_util_data.idle[stat_index-1] = atoll(tmp);
+	index=get_n_word_string(line,tmp,index,3); /* skip 2 stats */
+	duration_param->cpu_util_data.idle[stat_index-1] = atoll(tmp);
+
+	fclose(fp);
 }
 
 static int check_for_contig_pages_support(struct ibv_context *context)
 {
 	int answer;
-#ifdef HAVE_VERBS_EXP
+	#ifdef HAVE_VERBS_EXP
 	struct ibv_exp_device_attr attr;
 	memset(&attr,0,sizeof attr);
 	if (ibv_exp_query_device(context,&attr)) {
-                fprintf(stderr, "Couldn't get device attributes\n");
-                return FAILURE;
-        }
+		fprintf(stderr, "Couldn't get device attributes\n");
+		return FAILURE;
+	}
 	answer = ( attr.exp_device_cap_flags &= IBV_EXP_DEVICE_MR_ALLOCATE) ? SUCCESS : FAILURE;
-#else
+	#else
 	struct ibv_device_attr attr;
 
 	if (ibv_query_device(context,&attr)) {
@@ -233,7 +261,7 @@ static int check_for_contig_pages_support(struct ibv_context *context)
 	 * Warning: this bit can represent others things in different devices.
 	 */
 	answer = attr.device_cap_flags & (1 << 23) ? SUCCESS : FAILURE;
-#endif
+	#endif
 	return answer;
 }
 
@@ -304,13 +332,18 @@ static int ctx_xrc_srq_create(struct pingpong_context *ctx,struct perftest_param
 static struct ibv_qp *ctx_xrc_qp_create(struct pingpong_context *ctx,struct perftest_parameters *user_param,int qp_index)
 {
 	struct ibv_qp* qp = NULL;
-	struct ibv_qp_init_attr_ex qp_init_attr;
 	int num_of_qps = user_param->num_of_qps / 2;
+
+	#ifdef HAVE_VERBS_EXP
+	struct ibv_exp_qp_init_attr qp_init_attr;
+	#else
+	struct ibv_qp_init_attr_ex qp_init_attr;
+	#endif
 
 	memset(&qp_init_attr, 0, sizeof(qp_init_attr));
 
 	if ( (!(user_param->duplex || user_param->tst == LAT) && (user_param->machine == SERVER) )
-						|| ((user_param->duplex || user_param->tst == LAT) && (qp_index >= num_of_qps))) {
+			|| ((user_param->duplex || user_param->tst == LAT) && (qp_index >= num_of_qps))) {
 		qp_init_attr.qp_type = IBV_QPT_XRC_RECV;
 		qp_init_attr.comp_mask = IBV_QP_INIT_ATTR_XRCD;
 		qp_init_attr.xrcd = ctx->xrc_domain;
@@ -328,40 +361,24 @@ static struct ibv_qp *ctx_xrc_qp_create(struct pingpong_context *ctx,struct perf
 		qp_init_attr.cap.max_inline_data = user_param->inline_size;
 	}
 
-	qp = ibv_create_qp_ex(ctx->context,&qp_init_attr);
+	#ifdef HAVE_ACCL_VERBS
+	if (user_param->use_res_domain) {
+		qp_init_attr.comp_mask |= IBV_EXP_QP_INIT_ATTR_RES_DOMAIN;
+		qp_init_attr.res_domain = ctx->res_domain;
+	}
+	#endif
+
+	#ifdef HAVE_VERBS_EXP
+	qp = ibv_exp_create_qp(ctx->context, &qp_init_attr);
+	#else
+	qp = ibv_create_qp_ex(ctx->context, &qp_init_attr);
+	#endif
+
 	return qp;
 }
 #endif
 
 #ifdef HAVE_DC
-/******************************************************************************
- *
- ******************************************************************************/
-static struct ibv_qp *ctx_dc_qp_create(struct pingpong_context *ctx,struct perftest_parameters *user_param,int qp_index)
-{
-	struct ibv_qp_init_attr_ex qp_init_attr;
-	struct ibv_qp* qp = NULL;
-
-	memset(&qp_init_attr, 0, sizeof(struct ibv_qp_init_attr_ex));
-
-	qp_init_attr.send_cq = ctx->send_cq;
-	qp_init_attr.recv_cq = (user_param->verb == SEND) ? ctx->recv_cq : ctx->send_cq;
-	qp_init_attr.cap.max_inline_data = user_param->inline_size;
-	qp_init_attr.pd = ctx->pd;
-	qp_init_attr.comp_mask = IBV_QP_INIT_ATTR_PD;
-#if defined(HAVE_VERBS_EXP)
-	qp_init_attr.qp_type = IBV_EXP_QPT_DC_INI;
-#else
-	qp_init_attr.qp_type = IBV_QPT_DC_INI;
-#endif
-	qp_init_attr.srq = NULL;
-	qp_init_attr.cap.max_send_wr  = user_param->tx_depth;
-	qp_init_attr.cap.max_send_sge = MAX_SEND_SGE;
-
-	qp = ibv_create_qp_ex(ctx->context,&qp_init_attr);
-	return qp;
-}
-
 /******************************************************************************
  *
  ******************************************************************************/
@@ -375,18 +392,20 @@ static int ctx_dc_tgt_create(struct pingpong_context *ctx,struct perftest_parame
 
 	memset(&dattr,0,sizeof(struct ibv_exp_device_attr));
 
-	//in dc with bidirectional,
-	//there are send qps and recv qps. the actual number of send/recv qps
-	//is num_of_qps / 2.
+	/* in dc with bidirectional,
+	 * there are send qps and recv qps. the actual number of send/recv qps
+	 * is num_of_qps / 2.
+	 */
 	if (user_param->duplex || user_param->tst == LAT) {
 		num_of_qps /= 2;
 		num_of_qps_per_port = num_of_qps / 2;
 	}
 
-	// first half of qps are for ib_port and second half are for ib_port2
-	// in dc with bidirectional, the first half of qps are dc_ini qps and
-	// the second half are dc_tgts . the first half of the send/recv qps
-	// are for ib_port1 and the second half are for ib_port2
+	/* first half of qps are for ib_port and second half are for ib_port2
+	 * in dc with bidirectional, the first half of qps are dc_ini qps and
+	 * the second half are dc_tgts . the first half of the send/recv qps
+	 * are for ib_port1 and the second half are for ib_port2
+	 */
 	if (user_param->dualport == ON && (dct_index % num_of_qps >= num_of_qps_per_port))
 		port_num = user_param->ib_port2;
 	else
@@ -435,13 +454,13 @@ static int ctx_dc_tgt_create(struct pingpong_context *ctx,struct perftest_parame
 		.pkey_index = user_param->pkey_index,
 		.gid_index = user_param->gid_index,
 		.hop_limit = 1,
-		.inline_size = user_param->inline_recv_size,
+		.inline_size = user_param->inline_size,
 	};
 
 	ctx->dct[dct_index] = ibv_exp_create_dct(ctx->context, &dctattr);
 	if (!ctx->dct[dct_index]) {
 		printf("create dct failed\n");
-		return -1;
+		return FAILURE;
 	}
 
 	struct ibv_exp_dct_attr dcqattr;
@@ -450,15 +469,15 @@ static int ctx_dc_tgt_create(struct pingpong_context *ctx,struct perftest_parame
 	err = ibv_exp_query_dct(ctx->dct[dct_index], &dcqattr);
 	if (err) {
 		printf("query dct failed\n");
-		return -1;
+		return FAILURE;
 	} else if (dcqattr.dc_key != user_param->dct_key) {
 		printf("queried dckry (0x%llx) is different then provided at create (0x%llx)\n",
-			   (unsigned long long)dcqattr.dc_key,
-			   (unsigned long long)user_param->dct_key);
-		return -1;
+				(unsigned long long)dcqattr.dc_key,
+				(unsigned long long)user_param->dct_key);
+		return FAILURE;
 	} else if (dcqattr.state != IBV_EXP_DCT_STATE_ACTIVE) {
 		printf("state is not active %d\n", dcqattr.state);
-		return -1;
+		return FAILURE;
 	}
 
 	return 0;
@@ -485,21 +504,21 @@ static struct ibv_qp *ctx_rss_eth_qp_create(struct pingpong_context *ctx,struct 
 	attr.comp_mask = IBV_EXP_QP_INIT_ATTR_PD | IBV_EXP_QP_INIT_ATTR_QPG;
 	attr.pd = ctx->pd;
 
-	if (qp_index == 0) { //rss parent
-	#if defined(HAVE_VERBS_EXP)
+	if (qp_index == 0) { /* rss parent */
+		#ifdef HAVE_VERBS_EXP
 		attr.qpg.qpg_type = IBV_EXP_QPG_PARENT;
-	#else
+		#else
 		attr.qpg.qpg_type = IBV_QPG_PARENT;
-	#endif
+		#endif
 		attr.qpg.qpg_parent = NULL;
 		attr.qpg.parent_attrib.tss_child_count = 0;
-		attr.qpg.parent_attrib.rss_child_count = 2;
-	} else { //rss childs
-	#if defined(HAVE_VERBS_EXP)
+		attr.qpg.parent_attrib.rss_child_count = user_param->num_of_qps - 1;
+	} else { /* rss childs */
+		#ifdef HAVE_VERBS_EXP
 		attr.qpg.qpg_type = IBV_EXP_QPG_CHILD_RX;
-	#else
+		#else
 		attr.qpg.qpg_type = IBV_QPG_CHILD_RX;
-	#endif 
+		#endif
 		attr.qpg.qpg_parent = ctx->qp[0];
 	}
 	qp = ibv_exp_create_qp(ctx->context,&attr);
@@ -513,15 +532,15 @@ static struct ibv_qp *ctx_rss_eth_qp_create(struct pingpong_context *ctx,struct 
  *
  ******************************************************************************/
 int check_add_port(char **service,int port,
-				   const char *servername,
-				   struct addrinfo *hints,
-				   struct addrinfo **res) {
-
+		const char *servername,
+		struct addrinfo *hints,
+		struct addrinfo **res)
+{
 	int number;
 
 	if (asprintf(service,"%d", port) < 0) {
 		return FAILURE;
-	 }
+	}
 
 	number = getaddrinfo(servername,*service,hints,res);
 
@@ -537,11 +556,11 @@ int check_add_port(char **service,int port,
  *
  ******************************************************************************/
 int create_rdma_resources(struct pingpong_context *ctx,
-						  struct perftest_parameters *user_param) {
-
+		struct perftest_parameters *user_param)
+{
 	int is_udp_ps = user_param->connection_type == UD || user_param->connection_type == RawEth;
-
 	enum rdma_port_space port_space = (is_udp_ps) ? RDMA_PS_UDP : RDMA_PS_TCP;
+	struct rdma_cm_id **cm_id = (user_param->machine == CLIENT) ? &ctx->cm_id : &ctx->cm_id_control;
 
 	ctx->cm_channel = rdma_create_event_channel();
 	if (ctx->cm_channel == NULL) {
@@ -549,20 +568,9 @@ int create_rdma_resources(struct pingpong_context *ctx,
 		return FAILURE;
 	}
 
-	if (user_param->machine == CLIENT) {
-
-		if (rdma_create_id(ctx->cm_channel,&ctx->cm_id,NULL,port_space)) {
-			fprintf(stderr,"rdma_create_id failed\n");
-			return FAILURE;
-		}
-
-	} else {
-
-		if (rdma_create_id(ctx->cm_channel,&ctx->cm_id_control,NULL,port_space)) {
-			fprintf(stderr,"rdma_create_id failed\n");
-			return FAILURE;
-		}
-
+	if (rdma_create_id(ctx->cm_channel,cm_id,NULL,port_space)) {
+		fprintf(stderr,"rdma_create_id failed\n");
+		return FAILURE;
 	}
 
 	return SUCCESS;
@@ -572,7 +580,8 @@ int create_rdma_resources(struct pingpong_context *ctx,
  *
  ******************************************************************************/
 int destroy_rdma_resources(struct pingpong_context *ctx,
-					struct perftest_parameters *user_param) {
+		struct perftest_parameters *user_param)
+{
 	int ret;
 	if (user_param->machine == CLIENT) {
 		ret = rdma_destroy_id(ctx->cm_id);	
@@ -584,10 +593,10 @@ int destroy_rdma_resources(struct pingpong_context *ctx,
 }
 
 /******************************************************************************
-+ *
-+ ******************************************************************************/
-struct ibv_device* ctx_find_dev(const char *ib_devname) {
-
+  + *
+  + ******************************************************************************/
+struct ibv_device* ctx_find_dev(const char *ib_devname)
+{
 	int num_of_device;
 	struct ibv_device **dev_list;
 	struct ibv_device *ib_dev = NULL;
@@ -619,26 +628,38 @@ struct ibv_device* ctx_find_dev(const char *ib_devname) {
 /******************************************************************************
  *
  ******************************************************************************/
-void alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_param) {
+void alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_param)
+{
+	uint64_t tarr_size;
+	int num_of_qps_factor;
 
-	int tarr_size;
+	ctx->cycle_buffer = user_param->cycle_buffer;
+	ctx->cache_line_size = user_param->cache_line_size;
+
+	ALLOCATE(user_param->port_by_qp, uint64_t, user_param->num_of_qps);
 
 	tarr_size = (user_param->noPeak) ? 1 : user_param->iters*user_param->num_of_qps;
-	ALLOCATE(user_param->tposted,cycles_t,tarr_size);
+	ALLOCATE(user_param->tposted, cycles_t, tarr_size);
 	memset(user_param->tposted, 0, sizeof(cycles_t)*tarr_size);
 
 	if (user_param->tst == LAT && user_param->test_type == DURATION)
-		ALLOCATE(user_param->tcompleted,cycles_t,1);
+		ALLOCATE(user_param->tcompleted, cycles_t, 1);
 
-	ALLOCATE(ctx->qp,struct ibv_qp*,user_param->num_of_qps);
+	ALLOCATE(ctx->qp, struct ibv_qp*, user_param->num_of_qps);
+	ALLOCATE(ctx->mr, struct ibv_mr*, user_param->num_of_qps);
+	ALLOCATE(ctx->buf, void* , user_param->num_of_qps);
+
+	#ifdef HAVE_ACCL_VERBS
+	ALLOCATE(ctx->qp_burst_family, struct ibv_exp_qp_burst_family*, user_param->num_of_qps);
+	#endif
 
 	#ifdef HAVE_DC
 	if (user_param->connection_type == DC) {
-	#if defined(HAVE_VERBS_EXP)
-		ALLOCATE(ctx->dct,struct ibv_exp_dct*,user_param->num_of_qps);
-	#else
-		ALLOCATE(ctx->dct,struct ibv_dct*,user_param->num_of_qps);
-	#endif
+		#ifdef HAVE_VERBS_EXP
+		ALLOCATE(ctx->dct, struct ibv_exp_dct*, user_param->num_of_qps);
+		#else
+		ALLOCATE(ctx->dct, struct ibv_dct*, user_param->num_of_qps);
+		#endif
 	}
 	#endif
 
@@ -663,9 +684,9 @@ void alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_par
 	if (user_param->machine == CLIENT || user_param->tst == LAT || user_param->duplex) {
 
 		ALLOCATE(ctx->sge_list,struct ibv_sge,user_param->num_of_qps*user_param->post_list);
-	#if defined(HAVE_VERBS_EXP)
+		#ifdef HAVE_VERBS_EXP
 		ALLOCATE(ctx->exp_wr,struct ibv_exp_send_wr,user_param->num_of_qps*user_param->post_list);
-	#endif
+		#endif
 		ALLOCATE(ctx->wr,struct ibv_send_wr,user_param->num_of_qps*user_param->post_list);
 		if ((user_param->verb == SEND && user_param->connection_type == UD ) || user_param->connection_type == DC) {
 			ALLOCATE(ctx->ah,struct ibv_ah*,user_param->num_of_qps);
@@ -678,36 +699,42 @@ void alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_par
 		ALLOCATE(ctx->rwr,struct ibv_recv_wr,user_param->num_of_qps);
 		ALLOCATE(ctx->rx_buffer_addr,uint64_t,user_param->num_of_qps);
 	}
-    if (user_param->mac_fwd == ON ) 
-        cycle_buffer = user_param->size * user_param->rx_depth;
+	if (user_param->mac_fwd == ON )
+		ctx->cycle_buffer = user_param->size * user_param->rx_depth;
 
 	ctx->size = user_param->size;
-	ctx->buff_size = BUFF_SIZE(ctx->size)*2*user_param->num_of_qps;
 
-    user_param->buff_size = ctx->buff_size;
+	num_of_qps_factor = (user_param->mr_per_qp) ? 1 : user_param->num_of_qps;
+	ctx->buff_size = BUFF_SIZE(ctx->size, ctx->cycle_buffer) * 2 * num_of_qps_factor;
+
+	user_param->buff_size = ctx->buff_size;
 	if (user_param->connection_type == UD)
-		ctx->buff_size += CACHE_LINE_SIZE;
+		ctx->buff_size += ctx->cache_line_size;
 }
 
 /******************************************************************************
  *
  ******************************************************************************/
 int destroy_ctx(struct pingpong_context *ctx,
-				struct perftest_parameters *user_param)  {
-
-	int i, first;
+		struct perftest_parameters *user_param)
+{
+	int i, first, dereg_counter;
 	int test_result = 0;
 	int num_of_qps = user_param->num_of_qps;
 
-	if (user_param->use_rdma_cm == ON)
+	dereg_counter = (user_param->mr_per_qp) ? user_param->num_of_qps : 1;
+
+	if (user_param->work_rdma_cm == ON)
 		rdma_disconnect(ctx->cm_id);
 
-	//in dc with bidirectional,
-	//there are send qps and recv qps. the actual number of send/recv qps
-	//is num_of_qps / 2.
+	/* in dc with bidirectional,
+	 * there are send qps and recv qps. the actual number of send/recv qps
+	 * is num_of_qps / 2.
+	 */
 	if (user_param->duplex || user_param->tst == LAT) {
 		num_of_qps /= 2;
 	}
+
 	/* RSS parent should be last */
 	if (user_param->use_rss)
 		first = 1;
@@ -716,22 +743,22 @@ int destroy_ctx(struct pingpong_context *ctx,
 	for (i = first; i < user_param->num_of_qps; i++) {
 
 		if (( (user_param->connection_type == DC && !((!(user_param->duplex || user_param->tst == LAT) && (user_param->machine == SERVER) )
-								|| ((user_param->duplex || user_param->tst == LAT) && (i >= num_of_qps)))) || 
-										user_param->connection_type == UD) && (user_param->tst == LAT || user_param->machine == CLIENT || user_param->duplex)) {
+							|| ((user_param->duplex || user_param->tst == LAT) && (i >= num_of_qps)))) ||
+					user_param->connection_type == UD) && (user_param->tst == LAT || user_param->machine == CLIENT || user_param->duplex)) {
 			if (ibv_destroy_ah(ctx->ah[i])) {
 				fprintf(stderr, "failed to destroy AH\n");
 				test_result = 1;
 			}
 		}
 		#ifdef HAVE_DC
-		if (user_param->connection_type == DC &&   ((!(user_param->duplex || user_param->tst == LAT) 
-			&& (user_param->machine == SERVER)) || ((user_param->duplex || user_param->tst == LAT) && (i >= num_of_qps)))) {
-				if (ibv_exp_destroy_dct(ctx->dct[i])) {
-					fprintf(stderr, "failed to destroy dct\n");
-					test_result = 1;
-				}
-				if ( i == user_param->num_of_qps -1 )
-					return test_result;
+		if (user_param->connection_type == DC && ((!(user_param->duplex || user_param->tst == LAT)
+						&& (user_param->machine == SERVER)) || ((user_param->duplex || user_param->tst == LAT) && (i >= num_of_qps)))) {
+			if (ibv_exp_destroy_dct(ctx->dct[i])) {
+				fprintf(stderr, "failed to destroy dct\n");
+				test_result = 1;
+			}
+			if ( i == user_param->num_of_qps -1 )
+				return test_result;
 		} else
 		#endif
 		if (ibv_destroy_qp(ctx->qp[i])) {
@@ -759,8 +786,8 @@ int destroy_ctx(struct pingpong_context *ctx,
 			test_result = 1;
 		}
 	}
-#ifdef HAVE_XRCD
 
+	#ifdef HAVE_XRCD
 	if (user_param->use_xrc) {
 
 		if (ibv_close_xrcd(ctx->xrc_domain)) {
@@ -774,8 +801,7 @@ int destroy_ctx(struct pingpong_context *ctx,
 		}
 
 	}
-
-#endif
+	#endif
 
 	if (ibv_destroy_cq(ctx->send_cq)) {
 		fprintf(stderr, "failed to destroy CQ\n");
@@ -791,9 +817,11 @@ int destroy_ctx(struct pingpong_context *ctx,
 		}
 	}
 
-	if (ibv_dereg_mr(ctx->mr)) {
-		fprintf(stderr, "failed to deregister MR\n");
-		test_result = 1;
+	for (i = 0; i < dereg_counter; i++) {
+		if (ibv_dereg_mr(ctx->mr[i])) {
+			fprintf(stderr, "failed to deregister MR #%d\n", i+1);
+			test_result = 1;
+		}
 	}
 
 	if (user_param->verb == SEND && user_param->work_rdma_cm == ON && ctx->send_rcredit) {
@@ -826,14 +854,18 @@ int destroy_ctx(struct pingpong_context *ctx,
 	}
 
 	#ifdef HAVE_CUDA
-		if (user_param->use_cuda) {
-			pp_free_gpu(ctx);
-		}
-		else
+	if (user_param->use_cuda) {
+		pp_free_gpu(ctx);
+	}
+	else
 	#endif
-	if (ctx->is_contig_supported == FAILURE)
-		free(ctx->buf);
-
+	if (user_param->mmap_file != NULL) {
+		pp_free_mmap(ctx);
+	} else if (ctx->is_contig_supported == FAILURE) {
+		for (i = 0; i < dereg_counter; i++) {
+			free(ctx->buf[i]);
+		}
+	}
 	free(ctx->qp);
 
 	if ((user_param->tst == BW ) && (user_param->machine == CLIENT || user_param->duplex)) {
@@ -869,39 +901,687 @@ int destroy_ctx(struct pingpong_context *ctx,
 	return test_result;
 }
 
-#if defined(HAVE_VERBS_EXP)
-
-static struct ibv_qp* ctx_qp_create_inline_recv(struct pingpong_context *ctx,
-							 struct perftest_parameters *user_param) {
-
-	struct ibv_exp_qp_init_attr attr;
+/******************************************************************************
+ *
+ ******************************************************************************/
+#ifdef HAVE_VERBS_EXP
+static int check_inline_recv_support(struct pingpong_context *ctx,
+					struct perftest_parameters *user_param)
+{
 	struct ibv_exp_device_attr dattr;
-	struct ibv_qp* qp = NULL;
-	int ret;
+	int ret = 0;
 
-	memset(&attr, 0, sizeof(attr));
 	memset(&dattr, 0, sizeof(dattr));
 
 	dattr.comp_mask |= IBV_EXP_DEVICE_ATTR_INLINE_RECV_SZ;
 	ret = ibv_exp_query_device(ctx->context, &dattr);
 	if (ret) {
-			printf("  Couldn't query device for inline-receive capabilities.\n");
-		} else if (!(dattr.comp_mask & IBV_EXP_DEVICE_ATTR_INLINE_RECV_SZ)) {
-			printf("  Inline-receive not supported by driver.\n");
-		} else if (dattr.inline_recv_sz < user_param->inline_recv_size) {
-			printf("  Max inline-receive(%d) < Requested inline-receive(%d).\n",
-			       dattr.inline_recv_sz, user_param->inline_recv_size);
+		printf("  Couldn't query device for inline-receive capabilities.\n");
+	} else if (!(dattr.comp_mask & IBV_EXP_DEVICE_ATTR_INLINE_RECV_SZ)) {
+		printf("  Inline-receive not supported by driver.\n");
+		ret = 1;
+	} else if (dattr.inline_recv_sz < user_param->inline_recv_size) {
+		printf("  Max inline-receive(%d) < Requested inline-receive(%d).\n",
+			dattr.inline_recv_sz, user_param->inline_recv_size);
 	}
 
+	return ret;
+
+}
+#endif
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+#ifdef HAVE_ODP
+static int check_odp_support(struct pingpong_context *ctx)
+{
+	struct ibv_exp_device_attr dattr;
+	int ret = ibv_exp_query_device(ctx->context, &dattr);
+	if (ret) {
+		fprintf(stderr, " Couldn't query device for on-demand paging capabilities.\n");
+		return 0;
+	} else if (!(dattr.comp_mask & IBV_EXP_DEVICE_ATTR_ODP)) {
+		fprintf(stderr, " On-demand paging not supported by driver.\n");
+		return 0;
+	} else if (!(dattr.odp_caps.per_transport_caps.rc_odp_caps & IBV_EXP_ODP_SUPPORT_SEND)) {
+		fprintf(stderr, " Send is not supported for RC transport.\n");
+		return 0;
+	} else if (!(dattr.odp_caps.per_transport_caps.rc_odp_caps & IBV_EXP_ODP_SUPPORT_RECV)) {
+		fprintf(stderr, " Receive is not supported for RC transport.\n");
+		return 0;
+	}
+
+	return 1;
+}
+#endif
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+int create_reg_cqs(struct pingpong_context *ctx,
+		   struct perftest_parameters *user_param,
+		   int tx_buffer_depth, int need_recv_cq)
+{
+
+	ctx->send_cq = ibv_create_cq(ctx->context,tx_buffer_depth *
+					user_param->num_of_qps,NULL,ctx->channel,0);
+	if (!ctx->send_cq) {
+		fprintf(stderr, "Couldn't create CQ\n");
+		return FAILURE;
+	}
+
+	if (need_recv_cq) {
+		ctx->recv_cq = ibv_create_cq(ctx->context,user_param->rx_depth *
+						user_param->num_of_qps,NULL,ctx->channel,0);
+		if (!ctx->recv_cq) {
+			fprintf(stderr, "Couldn't create a receiver CQ\n");
+			return FAILURE;
+		}
+	}
+
+	return SUCCESS;
+}
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+#ifdef HAVE_VERBS_EXP
+int create_exp_cqs(struct pingpong_context *ctx,
+		   struct perftest_parameters *user_param,
+		   int tx_buffer_depth, int need_recv_cq)
+{
+	struct ibv_exp_cq_init_attr attr;
+	#ifdef HAVE_ACCL_VERBS
+	enum ibv_exp_query_intf_status intf_status;
+	struct ibv_exp_query_intf_params intf_params;
+	#endif
+
+	memset(&attr, 0, sizeof(attr));
+
+	#ifdef HAVE_ACCL_VERBS
+	if (user_param->use_res_domain) {
+		attr.res_domain = ctx->res_domain;
+	}
+
+	if (user_param->verb_type == ACCL_INTF) {
+		memset(&intf_params, 0, sizeof(intf_params));
+		intf_params.intf_scope = IBV_EXP_INTF_GLOBAL;
+		intf_params.intf = IBV_EXP_INTF_CQ;
+	}
+	#endif
+
+	ctx->send_cq = ibv_exp_create_cq(ctx->context, tx_buffer_depth *
+						user_param->num_of_qps, NULL,
+						ctx->channel, 0, &attr);
+	if (!ctx->send_cq) {
+		fprintf(stderr, "Couldn't create exp CQ\n");
+		return FAILURE;
+	}
+
+	if (need_recv_cq) {
+		ctx->recv_cq = ibv_create_cq(ctx->context,user_param->rx_depth *
+						user_param->num_of_qps,NULL,ctx->channel,0);
+		if (!ctx->recv_cq) {
+			fprintf(stderr, "Couldn't create a receiver CQ\n");
+			return FAILURE;
+		}
+	}
+
+	#ifdef HAVE_ACCL_VERBS
+	if (user_param->verb_type == ACCL_INTF) {
+		/* Check CQ family */
+		intf_params.obj = ctx->send_cq;
+		ctx->send_cq_family = ibv_exp_query_intf(ctx->context, &intf_params, &intf_status);
+		intf_params.obj = ctx->recv_cq;
+		ctx->recv_cq_family = ibv_exp_query_intf(ctx->context, &intf_params, &intf_status);
+
+		if (!ctx->send_cq_family || (!ctx->recv_cq_family && need_recv_cq)) {
+			fprintf(stderr, "Couldn't create CQ family.\n");
+			return FAILURE;
+		}
+	}
+	#endif
+
+	return SUCCESS;
+}
+#endif
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+int create_cqs(struct pingpong_context *ctx, struct perftest_parameters *user_param)
+{
+	int ret;
+	int dct_only = 0, need_recv_cq = 0;
+	int tx_buffer_depth = user_param->tx_depth;
+
+	if (user_param->connection_type == DC) {
+		dct_only = (user_param->machine == SERVER && !(user_param->duplex || user_param->tst == LAT));
+	}
+
+	if (dct_only)
+		tx_buffer_depth = user_param->rx_depth;
+
+	if ((user_param->connection_type == DC && !dct_only) || (user_param->verb == SEND))
+		need_recv_cq = 1;
+
+	#ifdef HAVE_VERBS_EXP
+	if (user_param->is_exp_cq)
+		ret = create_exp_cqs(ctx, user_param, tx_buffer_depth, need_recv_cq);
+	else
+	#endif
+		ret = create_reg_cqs(ctx, user_param, tx_buffer_depth, need_recv_cq);
+
+	return ret;
+}
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+#ifdef HAVE_ACCL_VERBS
+struct ibv_exp_res_domain* create_res_domain(struct pingpong_context *ctx, struct perftest_parameters *user_param)
+{
+	struct ibv_exp_res_domain_init_attr res_domain_attr;
+	struct ibv_exp_device_attr dattr;
+	uint32_t req_comp_mask;
+
+	/* Query device */
+	req_comp_mask = IBV_EXP_DEVICE_ATTR_CALC_CAP		|
+			IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS	|
+			IBV_EXP_DEVICE_ATTR_MAX_CTX_RES_DOMAIN;
+	dattr.comp_mask = req_comp_mask;
+
+	if (ibv_exp_query_device(ctx->context, &dattr)) {
+		fprintf(stderr, "Couldn't query device capabilities.\n");
+		return NULL;
+	} else if (dattr.comp_mask !=  req_comp_mask) {
+		fprintf(stderr, "This device does not support resource domain / accelerated verbs.\n");
+		return NULL;
+	}
+
+	/* Allocate resource domain */
+	res_domain_attr.comp_mask = IBV_EXP_RES_DOMAIN_THREAD_MODEL | IBV_EXP_RES_DOMAIN_MSG_MODEL;
+	res_domain_attr.thread_model = IBV_EXP_THREAD_SINGLE;
+	if (user_param->tst == BW)
+		res_domain_attr.msg_model = IBV_EXP_MSG_HIGH_BW;
+	else if (user_param->tst == LAT)
+		res_domain_attr.msg_model = IBV_EXP_MSG_LOW_LATENCY;
+	else
+		res_domain_attr.msg_model = IBV_EXP_MSG_DEFAULT;
+
+	return ibv_exp_create_res_domain(ctx->context, &res_domain_attr);
+}
+#endif
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+int create_single_mr(struct pingpong_context *ctx, struct perftest_parameters *user_param, int qp_index)
+{
+	int flags = IBV_ACCESS_LOCAL_WRITE;
+
+	#ifdef HAVE_VERBS_EXP
+	struct ibv_exp_reg_mr_in reg_mr_exp_in;
+	uint64_t exp_flags = IBV_EXP_ACCESS_LOCAL_WRITE;
+	#endif
+
+	/* ODP */
+	#ifdef HAVE_ODP
+	if (user_param->use_odp) {
+		if ( !check_odp_support(ctx) )
+			return 1;
+
+		/* ODP does not support contig pages */
+		ctx->is_contig_supported = FAILURE;
+		exp_flags |= IBV_EXP_ACCESS_ON_DEMAND;
+	}
+	#endif
+
+	#ifdef HAVE_CUDA
+	if (user_param->use_cuda) {
+		ctx->is_contig_supported = FAILURE;
+		if(pp_init_gpu(ctx, ctx->buff_size)) {
+			fprintf(stderr, "Couldn't allocate work buf.\n");
+			return 1;
+		}
+	} else
+	#endif
+
+	if (user_param->mmap_file != NULL) {
+		ctx->is_contig_supported = FAILURE;
+		if (pp_init_mmap(ctx, ctx->buff_size, user_param->mmap_file,
+				 user_param->mmap_offset))
+		{
+			fprintf(stderr, "Couldn't allocate work buf.\n");
+			return 1;
+		}
+
+	} else {
+		/* Allocating buffer for data, in case driver not support contig pages. */
+		if (ctx->is_contig_supported == FAILURE) {
+			ctx->buf[qp_index] = memalign(user_param->cycle_buffer, ctx->buff_size);
+			if (!ctx->buf[qp_index]) {
+				fprintf(stderr, "Couldn't allocate work buf.\n");
+				return 1;
+			}
+
+			memset(ctx->buf[qp_index], 0, ctx->buff_size);
+		} else {
+			ctx->buf[qp_index] = NULL;
+			#ifdef HAVE_VERBS_EXP
+			exp_flags |= IBV_EXP_ACCESS_ALLOCATE_MR;
+			#else
+			flags |= (1 << 5);
+			#endif
+		}
+	}
+
+	if (user_param->verb == WRITE) {
+		flags |= IBV_ACCESS_REMOTE_WRITE;
+		#ifdef HAVE_VERBS_EXP
+		exp_flags |= IBV_EXP_ACCESS_REMOTE_WRITE;
+		#endif
+	} else if (user_param->verb == READ) {
+		flags |= IBV_ACCESS_REMOTE_READ;
+		#ifdef HAVE_VERBS_EXP
+		exp_flags |= IBV_EXP_ACCESS_REMOTE_READ;
+		#endif
+		if (user_param->transport_type == IBV_TRANSPORT_IWARP)
+			flags |= IBV_ACCESS_REMOTE_WRITE;
+		#ifdef HAVE_VERBS_EXP
+		exp_flags |= IBV_EXP_ACCESS_REMOTE_WRITE;
+		#endif
+	} else if (user_param->verb == ATOMIC) {
+		flags |= IBV_ACCESS_REMOTE_ATOMIC;
+		#ifdef HAVE_VERBS_EXP
+		exp_flags |= IBV_EXP_ACCESS_REMOTE_ATOMIC;
+		#endif
+	}
+
+	/* Allocating Memory region and assigning our buffer to it. */
+	#ifdef HAVE_VERBS_EXP
+	if (ctx->is_contig_supported == SUCCESS || user_param->use_odp) {
+		reg_mr_exp_in.pd = ctx->pd;
+		reg_mr_exp_in.addr = ctx->buf[qp_index];
+		reg_mr_exp_in.length = ctx->buff_size;
+		reg_mr_exp_in.exp_access = exp_flags;
+		reg_mr_exp_in.comp_mask = 0;
+
+		ctx->mr[qp_index] = ibv_exp_reg_mr(&reg_mr_exp_in);
+	}
+	else
+		ctx->mr[qp_index] = ibv_reg_mr(ctx->pd, ctx->buf[qp_index], ctx->buff_size, flags);
+	#else
+	ctx->mr[qp_index] = ibv_reg_mr(ctx->pd, ctx->buf[qp_index], ctx->buff_size, flags);
+	#endif
+
+	if (!ctx->mr[qp_index]) {
+		fprintf(stderr, "Couldn't allocate MR\n");
+		return 1;
+	}
+
+	if (ctx->is_contig_supported == SUCCESS)
+		ctx->buf[qp_index] = ctx->mr[qp_index]->addr;
+
+	return 0;
+}
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+int create_mr(struct pingpong_context *ctx, struct perftest_parameters *user_param)
+{
+	int i;
+
+	/* create first MR */
+	if (create_single_mr(ctx, user_param, 0)) {
+		fprintf(stderr, "failed to create mr\n");
+		return 1;
+	}
+
+	/* create the rest if needed, or copy the first one */
+	for (i = 1; i < user_param->num_of_qps; i++) {
+		if (user_param->mr_per_qp) {
+			if (create_single_mr(ctx, user_param, i)) {
+				fprintf(stderr, "failed to create mr\n");
+				return 1;
+			}
+		} else {
+			ALLOCATE(ctx->mr[i], struct ibv_mr, 1);
+			memset(ctx->mr[i], 0, sizeof(struct ibv_mr));
+			ctx->mr[i] = ctx->mr[0];
+			ctx->buf[i] = ctx->buf[0] + (i*BUFF_SIZE(ctx->size, ctx->cycle_buffer));
+		}
+	}
+
+	return 0;
+}
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+int ctx_init(struct pingpong_context *ctx, struct perftest_parameters *user_param)
+{
+	int i;
+	int num_of_qps = user_param->num_of_qps / 2;
+
+	#ifdef HAVE_ACCL_VERBS
+	enum ibv_exp_query_intf_status intf_status;
+	struct ibv_exp_query_intf_params intf_params;
+	#endif
+
+	#ifdef HAVE_VERBS_EXP
+	struct ibv_exp_device_attr dattr;
+	memset(&dattr, 0, sizeof(dattr));
+	get_verbs_pointers(ctx);
+	#endif
+
+	ctx->is_contig_supported  = check_for_contig_pages_support(ctx->context);
+
+	/* Allocating an event channel if requested. */
+	if (user_param->use_event) {
+		ctx->channel = ibv_create_comp_channel(ctx->context);
+		if (!ctx->channel) {
+			fprintf(stderr, "Couldn't create completion channel\n");
+			return FAILURE;
+		}
+	}
+
+	/* Allocating the Protection domain. */
+	ctx->pd = ibv_alloc_pd(ctx->context);
+	if (!ctx->pd) {
+		fprintf(stderr, "Couldn't allocate PD\n");
+		return FAILURE;
+	}
+
+	#ifdef HAVE_ACCL_VERBS
+	if (user_param->use_res_domain) {
+		ctx->res_domain = create_res_domain(ctx, user_param);
+		if (!ctx->res_domain) {
+			fprintf(stderr, "Couldn't create resource domain\n");
+			return FAILURE;
+		}
+	}
+	#endif
+
+	if (create_mr(ctx, user_param)) {
+		fprintf(stderr, "Failed to create MR\n");
+	}
+
+	if (create_cqs(ctx, user_param)) {
+		fprintf(stderr, "Failed to create CQs\n");
+	}
+
+	#ifdef HAVE_XRCD
+	if (user_param->use_xrc) {
+
+		if (ctx_xrcd_create(ctx,user_param)) {
+			fprintf(stderr, "Couldn't create XRC resources\n");
+			return FAILURE;
+		}
+
+		if (ctx_xrc_srq_create(ctx,user_param)) {
+			fprintf(stderr, "Couldn't create SRQ XRC resources\n");
+			return FAILURE;
+		}
+	}
+	#endif
+
+	if (user_param->use_srq && !user_param->use_xrc && (user_param->tst == LAT || 
+				user_param->machine == SERVER || user_param->duplex == ON)) {
+
+		struct ibv_srq_init_attr attr = {
+			.attr = {
+				/* when using sreq, rx_depth sets the max_wr */
+				.max_wr  = user_param->rx_depth,
+				.max_sge = 1
+			}
+		};
+
+		ctx->srq = ibv_create_srq(ctx->pd, &attr);
+		if (!ctx->srq)  {
+			fprintf(stderr, "Couldn't create SRQ\n");
+			return FAILURE;
+		}
+	}
+
+	#ifdef HAVE_RSS_EXP
+	if (user_param->use_rss) {
+		struct ibv_exp_device_attr attr;
+
+		attr.comp_mask = IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS |
+			IBV_EXP_DEVICE_ATTR_RSS_TBL_SZ;
+		if (ibv_exp_query_device(ctx->context, &attr)) {
+			fprintf(stderr, "Experimental ibv_exp_query_device.\n");
+			exit(1);
+		}
+
+		if (!((attr.exp_device_cap_flags & IBV_EXP_DEVICE_QPG) &&
+					(attr.exp_device_cap_flags & IBV_EXP_DEVICE_UD_RSS) &&
+					(attr.comp_mask & IBV_EXP_DEVICE_ATTR_RSS_TBL_SZ) &&
+					(attr.max_rss_tbl_sz > 0))) {
+			fprintf(stderr, "RSS not supported .\n");
+			exit(1);
+		}
+
+		/* num of qps includes the parent */
+		if (user_param->num_of_qps > attr.max_rss_tbl_sz + 1) {
+			fprintf(stderr, "RSS limit is %d .\n",
+					attr.max_rss_tbl_sz);
+			exit(1);
+		}
+	}
+	#endif
+
+	for (i=0; i < user_param->num_of_qps; i++) {
+
+		if (create_qp_main(ctx, user_param, i, num_of_qps)) {
+			fprintf(stderr, "Failed to create QP.\n");
+			return FAILURE;
+		}
+
+		if (user_param->work_rdma_cm == OFF) {
+			modify_qp_to_init(ctx, user_param, i, num_of_qps);
+			#ifdef HAVE_ACCL_VERBS
+			if (user_param->verb_type == ACCL_INTF) {
+				memset(&intf_params, 0, sizeof(intf_params));
+				intf_params.intf_scope = IBV_EXP_INTF_GLOBAL;
+				intf_params.intf = IBV_EXP_INTF_QP_BURST;
+				intf_params.obj = ctx->qp[i];
+				ctx->qp_burst_family[i] = ibv_exp_query_intf(ctx->context, &intf_params, &intf_status);
+				if (!ctx->qp_burst_family[i]) {
+					fprintf(stderr, "Couldn't get QP burst family.\n");
+					return FAILURE;
+				}
+			}
+			#endif
+		}
+	}
+
+	return SUCCESS;
+}
+
+int modify_qp_to_init(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int qp_index, int num_of_qps)
+{
+	uint64_t init_flag = 0;
+
+	#ifdef HAVE_RSS_EXP
+	if (qp_index == 0 && user_param->use_rss) {
+		init_flag = IBV_EXP_QP_GROUP_RSS;
+	}
+	else
+	#endif
+		init_flag = 0;
+
+	if(user_param->connection_type == DC) {
+		if ( !((!(user_param->duplex || user_param->tst == LAT) && (user_param->machine == SERVER) )
+					|| ((user_param->duplex || user_param->tst == LAT) && (qp_index >= num_of_qps)))) {
+			#ifdef HAVE_DC
+			if (ctx_modify_dc_qp_to_init(ctx->qp[qp_index],user_param)) {
+				fprintf(stderr," Unable to create DC QP.\n");
+				return FAILURE;
+			}
+			#endif
+		}
+	} else {
+		if (ctx_modify_qp_to_init(ctx->qp[qp_index],user_param,init_flag)) {
+			fprintf(stderr, "Failed to modify QP to INIT\n");
+			return FAILURE;
+		}
+	}
+
+	return SUCCESS;
+}
+
+/******************************************************************************
+ *
+ ******************************************************************************/
+int create_reg_qp_main(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int i, int num_of_qps)
+{
+	ctx->qp[i] = ctx_qp_create(ctx,user_param);
+	if (ctx->qp[i] == NULL) {
+		fprintf(stderr," Unable to create QP.\n");
+		return FAILURE;
+	}
+
+	return SUCCESS;
+}
+
+
+int create_exp_qp_main(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int i, int num_of_qps)
+{
+	int is_dc_tgt_query = 0;
+	is_dc_tgt_query |= !(user_param->duplex || user_param->tst == LAT) && (user_param->machine == SERVER);
+	is_dc_tgt_query |= (user_param->duplex || user_param->tst == LAT) && (i >= num_of_qps);
+	is_dc_tgt_query &= user_param->connection_type == DC;
+
+	if (is_dc_tgt_query) {
+		#ifdef HAVE_DC
+		if(ctx_dc_tgt_create(ctx,user_param,i)) {
+			return FAILURE;
+		}
+		/* in order to not change anything in the test */
+		ALLOCATE(ctx->qp[i], struct ibv_qp, 1);
+		ctx->qp[i]->qp_num = ctx->dct[i]->dct_num;
+		#else
+		fprintf(stderr, "DC is not supported.\n");
+		return FAILURE;
+		#endif
+	} else if (user_param->use_rss && user_param->connection_type == RawEth) {
+		#ifdef HAVE_RSS_EXP
+		ctx->qp[i] = ctx_rss_eth_qp_create(ctx, user_param, i);
+		#endif
+		if (ctx->qp[i] == NULL) {
+			fprintf(stderr," Unable to create RSS QP.\n");
+			return FAILURE;
+		}
+	} else if (user_param->use_xrc) {
+		#ifdef HAVE_XRCD
+		ctx->qp[i] = ctx_xrc_qp_create(ctx, user_param, i);
+		#endif
+		if (ctx->qp[i] == NULL) {
+			fprintf(stderr," Unable to create XRC QP.\n");
+			return FAILURE;
+		}
+	} else {
+		#ifdef HAVE_VERBS_EXP
+		ctx->qp[i] = ctx_exp_qp_create(ctx, user_param, i);
+		#endif
+		if (ctx->qp[i] == NULL) {
+			fprintf(stderr, " Unable to create exp QP.\n");
+			return FAILURE;
+		}
+	}
+	return SUCCESS;
+}
+
+int create_qp_main(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int i, int num_of_qps)
+{
+	int ret, query;
+
+	/* flag that indicates that we are going to use exp QP */
+	query = (user_param->connection_type == DC);
+	query |= (user_param->use_rss && user_param->connection_type == RawEth);
+	query |= user_param->use_xrc;
+	query |= user_param->inline_recv_size != 0;
+	query |= user_param->masked_atomics;
+	query |= user_param->verb_type != NORMAL_INTF;
+	query |= user_param->use_res_domain;
+
+	if (query == 1)
+		user_param->is_exp_qp = 1;
+
+	#ifdef HAVE_VERBS_EXP
+	if (user_param->is_exp_qp)
+		ret = create_exp_qp_main(ctx, user_param, i, num_of_qps);
+	else
+	#endif
+		ret = create_reg_qp_main(ctx, user_param, i, num_of_qps);
+
+	return ret;
+}
+
+
+
+#ifdef HAVE_VERBS_EXP
+struct ibv_qp* ctx_exp_qp_create(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int qp_index)
+{
+	struct ibv_exp_qp_init_attr attr;
+	struct ibv_qp* qp = NULL;
+	struct ibv_exp_device_attr dev_attr;
+
+	memset(&attr, 0, sizeof(attr));
+	memset(&dev_attr, 0, sizeof(dev_attr));
+	attr.comp_mask = IBV_EXP_QP_INIT_ATTR_PD | IBV_EXP_QP_INIT_ATTR_CREATE_FLAGS;
+
+	if (user_param->masked_atomics) {
+		#ifdef HAVE_MASKED_ATOMICS
+		dev_attr.comp_mask = IBV_EXP_DEVICE_ATTR_EXT_ATOMIC_ARGS | IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS;
+
+		if (ibv_exp_query_device(ctx->context, &dev_attr)) {
+			fprintf(stderr, "ibv_exp_query_device failed\n");
+			return NULL;
+		}
+
+		attr.max_atomic_arg = pow(2,dev_attr.ext_atom.log_max_atomic_inline);
+		attr.exp_create_flags |= IBV_EXP_QP_CREATE_ATOMIC_BE_REPLY;
+		attr.comp_mask |= IBV_EXP_QP_INIT_ATTR_ATOMICS_ARG;
+		#else
+		fprintf(stderr, "Can't create masked atomic QP.\n");
+		return NULL;
+		#endif
+	}
+
+	if (user_param->inline_recv_size) {
+
+		if (check_inline_recv_support(ctx, user_param)) {
+			fprintf(stderr, "Failed to create QP with inline receive.\n");
+			return NULL;
+		}
+
+		attr.comp_mask |= IBV_EXP_QP_INIT_ATTR_INL_RECV;
+		attr.max_inl_recv = user_param->inline_recv_size;
+	}
+
+	#ifdef HAVE_ACCL_VERBS
+	if (user_param->use_res_domain) {
+		attr.comp_mask |= IBV_EXP_QP_INIT_ATTR_RES_DOMAIN;
+		attr.res_domain = ctx->res_domain;
+	}
+	#endif
+
+	attr.pd = ctx->pd;
 	attr.send_cq = ctx->send_cq;
 	attr.recv_cq = (user_param->verb == SEND) ? ctx->recv_cq : ctx->send_cq;
 	attr.cap.max_send_wr  = user_param->tx_depth;
 	attr.cap.max_send_sge = MAX_SEND_SGE;
 	attr.cap.max_inline_data = user_param->inline_size;
-	attr.max_inl_recv = user_param->inline_recv_size;
-	attr.pd = ctx->pd;
-	attr.comp_mask = IBV_EXP_QP_INIT_ATTR_PD;
-	attr.comp_mask |= IBV_EXP_QP_INIT_ATTR_INL_RECV;
 
 	if (user_param->use_srq && (user_param->tst == LAT || user_param->machine == SERVER || user_param->duplex == ON)) {
 		attr.srq = ctx->srq;
@@ -918,310 +1598,29 @@ static struct ibv_qp* ctx_qp_create_inline_recv(struct pingpong_context *ctx,
 		case RC : attr.qp_type = IBV_QPT_RC; break;
 		case UC : attr.qp_type = IBV_QPT_UC; break;
 		case UD : attr.qp_type = IBV_QPT_UD; break;
-#ifdef HAVE_XRCD
-		case XRC : attr.qp_type = IBV_QPT_XRC; break;
-#endif
-#ifdef HAVE_RAW_ETH
+		#ifdef HAVE_RAW_ETH
 		case RawEth : attr.qp_type = IBV_QPT_RAW_PACKET; break;
-#endif
+		#endif
+		case DC : attr.qp_type = IBV_EXP_QPT_DC_INI; break;
 		default:  fprintf(stderr, "Unknown connection type \n");
-			return NULL;
+			  return NULL;
 	}
 
 	qp = ibv_exp_create_qp(ctx->context, &attr);
+	if (!qp)
+		return NULL;
 
 	if (user_param->inline_recv_size > attr.max_inl_recv)
-			printf("  Actual inline-receive(%d) < requested inline-receive(%d)\n",
-			       attr.max_inl_recv, user_param->inline_recv_size);
+		printf("  Actual inline-receive(%d) < requested inline-receive(%d)\n",
+				attr.max_inl_recv, user_param->inline_recv_size);
 
 	return qp;
 }
 #endif
 
-/******************************************************************************
- *
- ******************************************************************************/
-int ctx_init(struct pingpong_context *ctx,struct perftest_parameters *user_param) {
-
-	int i;
-	int flags = IBV_ACCESS_LOCAL_WRITE;
-	int num_of_qps = user_param->num_of_qps / 2;
-	uint64_t init_flag = 0;
-	int only_dct = 0;
-	int tx_buffer_depth = user_param->tx_depth;
-	#if defined(HAVE_VERBS_EXP)
-	struct ibv_exp_reg_mr_in reg_mr_exp_in;
-	uint64_t exp_flags = IBV_EXP_ACCESS_LOCAL_WRITE;
-	#endif
-
-	#ifdef HAVE_VERBS_EXP
-	get_verbs_pointers(ctx);
-	#endif
-
-	if (user_param->connection_type == DC) {
-		only_dct = (user_param->machine == SERVER && !(user_param->duplex || user_param->tst == LAT));
-	}
-
-	ctx->is_contig_supported  = check_for_contig_pages_support(ctx->context);
-
-	#ifdef HAVE_CUDA
-	if (user_param->use_cuda) {
-		ctx->is_contig_supported = FAILURE;
-		if(pp_init_gpu(ctx, ctx->buff_size)) {
-			fprintf(stderr, "Couldn't allocate work buf.\n");
-			return NULL;
-		}
-	}
-	else {
-	#endif
-		// Allocating buffer for data, in case driver not support contig pages.
-		if (ctx->is_contig_supported == FAILURE) {
-
-			ctx->buf = memalign(sysconf(_SC_PAGESIZE),ctx->buff_size);
-			if (!ctx->buf) {
-				fprintf(stderr, "Couldn't allocate work buf.\n");
-				exit(1);
-			}
-
-			memset(ctx->buf, 0,ctx->buff_size);
-
-		} else {
-			ctx->buf = NULL;
-		#if defined(HAVE_VERBS_EXP)
-			exp_flags |= IBV_EXP_ACCESS_ALLOCATE_MR;
-		#else
-			flags |= (1 << 5);
-		#endif
-		}
-#ifdef HAVE_CUDA
-	}
-#endif
-	// Allocating an event channel if requested.
-	if (user_param->use_event) {
-		ctx->channel = ibv_create_comp_channel(ctx->context);
-		if (!ctx->channel) {
-			fprintf(stderr, "Couldn't create completion channel\n");
-			return FAILURE;
-		}
-	}
-
-	// Allocating the Protection domain.
-	ctx->pd = ibv_alloc_pd(ctx->context);
-	if (!ctx->pd) {
-		fprintf(stderr, "Couldn't allocate PD\n");
-		return FAILURE;
-	}
-
-	if (user_param->verb == WRITE) {
-		flags |= IBV_ACCESS_REMOTE_WRITE;
-		#ifdef HAVE_VERBS_EXP
-		exp_flags |= IBV_EXP_ACCESS_REMOTE_WRITE;
-		#endif
-
-	} else if (user_param->verb == READ) {
-		flags |= IBV_ACCESS_REMOTE_READ;
-		#ifdef HAVE_VERBS_EXP
-                exp_flags |= IBV_EXP_ACCESS_REMOTE_READ;
-                #endif
-	if (user_param->transport_type == IBV_TRANSPORT_IWARP)
-		flags |= IBV_ACCESS_REMOTE_WRITE;
-		#ifdef HAVE_VERBS_EXP
-                exp_flags |= IBV_EXP_ACCESS_REMOTE_WRITE;
-                #endif
-
-	} else if (user_param->verb == ATOMIC) {
-		flags |= IBV_ACCESS_REMOTE_ATOMIC;
-		#ifdef HAVE_VERBS_EXP
-                exp_flags |= IBV_EXP_ACCESS_REMOTE_ATOMIC;
-                #endif
-	}
-
-	// Allocating Memory region and assigning our buffer to it.
-#if defined(HAVE_VERBS_EXP)
-	reg_mr_exp_in.pd = ctx->pd;
-	reg_mr_exp_in.addr = ctx->buf;
-	reg_mr_exp_in.length = ctx->buff_size;
-	reg_mr_exp_in.exp_access = exp_flags;
-	reg_mr_exp_in.comp_mask = 0;
-	if (ctx->is_contig_supported == SUCCESS){
-		ctx->mr = ibv_exp_reg_mr(&reg_mr_exp_in);
-	}
-	else
-		ctx->mr = ibv_reg_mr(ctx->pd,ctx->buf,ctx->buff_size,flags);
-#else
-	ctx->mr = ibv_reg_mr(ctx->pd,ctx->buf,ctx->buff_size,flags);
-#endif
-	if (!ctx->mr) {
-		fprintf(stderr, "Couldn't allocate MR\n");
-		return FAILURE;
-	}
-
-	if (ctx->is_contig_supported == SUCCESS)
-		ctx->buf = ctx->mr->addr;
-
-	if (only_dct == 1)
-		tx_buffer_depth = user_param->rx_depth;
-
-	ctx->send_cq = ibv_create_cq(ctx->context,tx_buffer_depth*user_param->num_of_qps,NULL,ctx->channel,0);
-	if (!ctx->send_cq) {
-		fprintf(stderr, "Couldn't create CQ\n");
-		return FAILURE;
-	}
-	if ((user_param->connection_type == DC && only_dct == 0) || ((user_param->verb == SEND && user_param->connection_type != DC))) {
-		ctx->recv_cq = ibv_create_cq(ctx->context,user_param->rx_depth*user_param->num_of_qps,NULL,ctx->channel,0);
-		if (!ctx->recv_cq) {
-			fprintf(stderr, "Couldn't create a receiver CQ\n");
-			return FAILURE;
-		}
-	}
-
-#ifdef HAVE_XRCD
-	if (user_param->use_xrc) {
-
-		if (ctx_xrcd_create(ctx,user_param)) {
-			fprintf(stderr, "Couldn't create XRC resources\n");
-			return FAILURE;
-		}
-
-		if (ctx_xrc_srq_create(ctx,user_param)) {
-			fprintf(stderr, "Couldn't create SRQ XRC resources\n");
-			return FAILURE;
-		}
-	}
-#endif
-
-	if (user_param->use_srq && !user_param->use_xrc && (user_param->tst == LAT || user_param->machine == SERVER || user_param->duplex == ON)) {
-
-		struct ibv_srq_init_attr attr = {
-				.attr = {
-					//when using sreq, rx_depth sets the max_wr
-					.max_wr  = user_param->rx_depth,
-					.max_sge = 1
-				}
-		};
-
-		ctx->srq = ibv_create_srq(ctx->pd, &attr);
-		if (!ctx->srq)  {
-				fprintf(stderr, "Couldn't create SRQ\n");
-				return FAILURE;
-		}
-	}
-#ifdef HAVE_RSS_EXP
-	if (user_param->use_rss) {
-		struct ibv_exp_device_attr attr;
-
-		attr.comp_mask = IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS |
-				 IBV_EXP_DEVICE_ATTR_RSS_TBL_SZ;
-		if (ibv_exp_query_device(ctx->context, &attr)) {
-			fprintf(stderr, "Experimental ibv_exp_query_device.\n");
-			exit(1);
-		}
-
-		if (!((attr.exp_device_cap_flags & IBV_EXP_DEVICE_QPG) &&
-		      (attr.exp_device_cap_flags & IBV_EXP_DEVICE_UD_RSS) &&
-		      (attr.comp_mask & IBV_EXP_DEVICE_ATTR_RSS_TBL_SZ) &&
-		      (attr.max_rss_tbl_sz > 0))) {
-			fprintf(stderr, "RSS not supported .\n");
-			exit(1);
-		}
-
-		/* num of qps includes the parent */
-		if (user_param->num_of_qps > attr.max_rss_tbl_sz + 1) {
-			fprintf(stderr, "RSS limit is %d .\n",
-				attr.max_rss_tbl_sz);
-			exit(1);
-		}
-	}
-#endif
-	for (i=0; i < user_param->num_of_qps; i++) {
-
-		if(user_param->connection_type == DC) {
-			#ifdef HAVE_DC
-				if ( (!(user_param->duplex || user_param->tst == LAT) && (user_param->machine == SERVER) )
-								|| ((user_param->duplex || user_param->tst == LAT) && (i >= num_of_qps))) {
-
-					ctx_dc_tgt_create(ctx,user_param,i);
-					//in order to not change anything in the test
-					ALLOCATE(ctx->qp[i],struct ibv_qp,1);
-					ctx->qp[i]->qp_num = ctx->dct[i]->dct_num;
-				}
-				else {
-					ctx->qp[i] = ctx_dc_qp_create(ctx,user_param,i);
-				}
-			#endif
-				if (ctx->qp[i] == NULL) {
-					fprintf(stderr," Unable to create DC QP.\n");
-					return FAILURE;
-				}
-		} else if (user_param->use_rss && user_param->connection_type == RawEth) {
-			#ifdef HAVE_RSS_EXP
-			ctx->qp[i] = ctx_rss_eth_qp_create(ctx,user_param,i);
-			#endif
-			if (ctx->qp[i] == NULL) {
-				fprintf(stderr," Unable to create RSS QP.\n");
-				return FAILURE;
-			}
-		} else if (user_param->use_xrc) {
-			#ifdef HAVE_XRCD
-				ctx->qp[i] = ctx_xrc_qp_create(ctx,user_param,i);
-			#endif
-				if (ctx->qp[i] == NULL) {
-					fprintf(stderr," Unable to create XRC QP.\n");
-					return FAILURE;
-				}
-		} else if (user_param->inline_recv_size) {
-			#if defined(HAVE_VERBS_EXP)
-			ctx->qp[i] = ctx_qp_create_inline_recv(ctx,user_param);
-			#endif
-			if (ctx->qp[i] == NULL) {
-				fprintf(stderr," Unable to create Inline Recv QP.\n");
-				return FAILURE;
-			}
-		} else {
-			ctx->qp[i] = ctx_qp_create(ctx,user_param);
-			if (ctx->qp[i] == NULL) {
-				fprintf(stderr," Unable to create QP.\n");
-				return FAILURE;
-			}
-		}
-
-		if (user_param->work_rdma_cm == OFF) {
-			#ifdef HAVE_RSS_EXP
-			if (i == 0 && user_param->use_rss) {
-				init_flag = IBV_EXP_QP_GROUP_RSS;
-			}
-			else
-			#endif
-				init_flag = 0;
-
-			if(user_param->connection_type == DC) {
-				if ( !((!(user_param->duplex || user_param->tst == LAT) && (user_param->machine == SERVER) )
-								|| ((user_param->duplex || user_param->tst == LAT) && (i >= num_of_qps)))) {
-				#ifdef HAVE_DC
-					if (ctx_modify_dc_qp_to_init(ctx->qp[i],user_param)) {
-						fprintf(stderr," Unable to create DC QP.\n");
-						return FAILURE;
-					}
-				#endif
-				}
-			} else {
-				if (ctx_modify_qp_to_init(ctx->qp[i],user_param,init_flag)) {
-					fprintf(stderr, "Failed to modify QP to INIT\n");
-					return FAILURE;
-				}
-			}
-		}
-	}
-
-	return SUCCESS;
-}
-
-/******************************************************************************
- *
- ******************************************************************************/
 struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
-							 struct perftest_parameters *user_param) {
-
+		struct perftest_parameters *user_param)
+{
 	struct ibv_qp_init_attr attr;
 	struct ibv_qp* qp = NULL;
 
@@ -1247,18 +1646,14 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
 		case RC : attr.qp_type = IBV_QPT_RC; break;
 		case UC : attr.qp_type = IBV_QPT_UC; break;
 		case UD : attr.qp_type = IBV_QPT_UD; break;
-#ifdef HAVEE_XRCD
-		case XRC : attr.qp_type = IBV_QPT_XRC; break;
-#endif
-#ifdef HAVE_RAW_ETH
+		#ifdef HAVE_RAW_ETH
 		case RawEth : attr.qp_type = IBV_QPT_RAW_PACKET; break;
-#endif
+		#endif
 		default:  fprintf(stderr, "Unknown connection type \n");
-			return NULL;
+			  return NULL;
 	}
 
 	if (user_param->work_rdma_cm) {
-
 		if (rdma_create_qp(ctx->cm_id,ctx->pd,&attr)) {
 			fprintf(stderr, " Couldn't create rdma QP - %s\n",strerror(errno));
 			return NULL;
@@ -1271,30 +1666,92 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
 	return qp;
 }
 
-#ifdef HAVE_DC
 
- /******************************************************************************
+#ifdef HAVE_MASKED_ATOMICS
+/******************************************************************************
  *
  ******************************************************************************/
-int ctx_modify_dc_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_param)  {
+struct ibv_qp* ctx_atomic_qp_create(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param)
+{
+	struct ibv_exp_qp_init_attr	attr;
+	struct ibv_qp* qp = NULL;
+	struct ibv_exp_device_attr dev_attr;
 
+	memset(&dev_attr, 0, sizeof(dev_attr));
+
+	dev_attr.comp_mask |= IBV_EXP_DEVICE_ATTR_EXT_ATOMIC_ARGS | IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS;
+
+	if (ibv_exp_query_device(ctx->context, &dev_attr)) {
+		fprintf(stderr, "ibv_exp_query_device failed\n");
+		exit(1);
+	}
+
+	memset(&attr, 0, sizeof(struct ibv_exp_qp_init_attr));
+	attr.pd = ctx->pd;
+	attr.send_cq = ctx->send_cq;
+	attr.recv_cq = (user_param->verb == SEND) ? ctx->recv_cq : ctx->send_cq;
+	attr.cap.max_send_wr  = user_param->tx_depth;
+	attr.cap.max_send_sge = MAX_SEND_SGE;
+	attr.cap.max_inline_data = user_param->inline_size;
+	attr.max_atomic_arg = pow(2,dev_attr.ext_atom.log_max_atomic_inline);
+	attr.exp_create_flags = IBV_EXP_QP_CREATE_ATOMIC_BE_REPLY;
+	attr.comp_mask = IBV_EXP_QP_INIT_ATTR_CREATE_FLAGS | IBV_EXP_QP_INIT_ATTR_PD;
+	attr.comp_mask |= IBV_EXP_QP_INIT_ATTR_ATOMICS_ARG;
+
+	if (user_param->use_srq && (user_param->tst == LAT || user_param->machine == SERVER || user_param->duplex == ON)) {
+		attr.srq = ctx->srq;
+		attr.cap.max_recv_wr  = 0;
+		attr.cap.max_recv_sge = 0;
+	} else {
+		attr.srq = NULL;
+		attr.cap.max_recv_wr  = user_param->rx_depth;
+		attr.cap.max_recv_sge = MAX_RECV_SGE;
+	}
+
+	switch (user_param->connection_type) {
+
+		case RC : attr.qp_type = IBV_QPT_RC; break;
+		case UC : attr.qp_type = IBV_QPT_UC; break;
+		case UD : attr.qp_type = IBV_QPT_UD; break;
+		#ifdef HAVE_XRCD
+		case XRC : attr.qp_type = IBV_QPT_XRC; break;
+		#endif
+		#ifdef HAVE_RAW_ETH
+		case RawEth : attr.qp_type = IBV_QPT_RAW_PACKET; break;
+		#endif
+		default:  fprintf(stderr, "Unknown connection type \n");
+			  return NULL;
+	}
+
+	qp = ibv_exp_create_qp(ctx->context, &attr);
+
+	return qp;
+}
+#endif
+
+#ifdef HAVE_DC
+/******************************************************************************
+ *
+ ******************************************************************************/
+int ctx_modify_dc_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_param)
+{
 	int num_of_qps = user_param->num_of_qps;
 	int num_of_qps_per_port = user_param->num_of_qps / 2;
 	int err;
 	uint64_t flags;
 
-#if defined(HAVE_VERBS_EXP)
+	#ifdef HAVE_VERBS_EXP
 	struct ibv_exp_qp_attr attr;
 	memset(&attr, 0, sizeof(struct ibv_exp_qp_attr));
 	flags = IBV_EXP_QP_STATE | IBV_EXP_QP_PKEY_INDEX | IBV_EXP_QP_PORT;
-#else
+	#else
 	struct ibv_qp_attr attr;
 	memset(&attr, 0, sizeof(struct ibv_qp_attr));
 	flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT;
-#endif
+	#endif
 
-	static int portindex=0;  // for dual-port support
-	memset(&attr, 0,sizeof(struct ibv_qp_attr));
+	static int portindex=0;  /* for dual-port support */
 
 	attr.qp_state        = IBV_QPS_INIT;
 	attr.pkey_index      = user_param->pkey_index;
@@ -1308,9 +1765,11 @@ int ctx_modify_dc_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_
 
 	if (user_param->dualport==ON) {
 		if (portindex % num_of_qps < num_of_qps_per_port) {
-	        attr.port_num = user_param->ib_port;
+			attr.port_num = user_param->ib_port;
+			user_param->port_by_qp[portindex] = 0;
 		} else {
 			attr.port_num = user_param->ib_port2;
+			user_param->port_by_qp[portindex] = 1;
 		}
 		portindex++;
 
@@ -1319,17 +1778,14 @@ int ctx_modify_dc_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_
 		attr.port_num = user_param->ib_port;
 	}
 
-#if defined(HAVE_VERBS_EXP)
+	#ifdef HAVE_VERBS_EXP
 	flags |= IBV_EXP_QP_DC_KEY;
-//	attr.exp_attr_mask   = IBV_EXP_QP_DC_KEY;
-//	attr.comp_mask       = IBV_EXP_QP_ATTR_DCT_KEY | IBV_EXP_QP_ATTR_EXP_MASK;
 	err = ibv_exp_modify_qp(qp,&attr,flags);
-#else
+	#else
 	flags |= IBV_QP_DC_KEY;
 	attr.comp_mask = IBV_QP_ATTR_DCT_KEY;
 	err = ibv_modify_qp(qp,&attr,flags);
-#endif
-
+	#endif
 
 	if (err) {
 		fprintf(stderr, "Failed to modify QP to INIT\n");
@@ -1339,34 +1795,34 @@ int ctx_modify_dc_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_
 }
 #endif
 
- /******************************************************************************
+/******************************************************************************
  *
  ******************************************************************************/
-int ctx_modify_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_param, uint64_t init_flag)  {
-
+int ctx_modify_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_param, uint64_t init_flag)
+{
 	int num_of_qps = user_param->num_of_qps;
 	int num_of_qps_per_port = user_param->num_of_qps / 2;
 
 	struct ibv_qp_attr attr;
-        int flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT;
+	int flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT;
 
 	#ifdef HAVE_VERBS_EXP
 	struct ibv_exp_qp_attr exp_attr;
 	uint64_t exp_flags = 0;
 	#endif
 
-	static int portindex=0;  // for dual-port support
+	static int portindex=0;  /* for dual-port support */
 	int ret = 0;
 
 	memset(&attr, 0, sizeof(struct ibv_qp_attr));
 	attr.qp_state        = IBV_QPS_INIT;
 	attr.pkey_index      = user_param->pkey_index;
 
-        #ifdef HAVE_VERBS_EXP
-        memset(&exp_attr, 0, sizeof(struct ibv_exp_qp_attr));
-        exp_attr.qp_state        = attr.qp_state;
-        exp_attr.pkey_index      = attr.pkey_index;
-        #endif
+	#ifdef HAVE_VERBS_EXP
+	memset(&exp_attr, 0, sizeof(struct ibv_exp_qp_attr));
+	exp_attr.qp_state        = attr.qp_state;
+	exp_attr.pkey_index      = attr.pkey_index;
+	#endif
 
 	if ( user_param->use_xrc && (user_param->duplex || user_param->tst == LAT)) {
 		num_of_qps /= 2;
@@ -1375,9 +1831,11 @@ int ctx_modify_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_par
 
 	if (user_param->dualport==ON) {
 		if (portindex % num_of_qps < num_of_qps_per_port) {
-	        attr.port_num = user_param->ib_port;
+			attr.port_num = user_param->ib_port;
+			user_param->port_by_qp[portindex] = 0;
 		} else {
 			attr.port_num = user_param->ib_port2;
+			user_param->port_by_qp[portindex] = 1;
 		}
 		portindex++;
 
@@ -1392,9 +1850,9 @@ int ctx_modify_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_par
 
 	if (user_param->connection_type == RawEth) {
 		flags = IBV_QP_STATE | IBV_QP_PORT;
-                #ifdef HAVE_VERBS_EXP
-                exp_flags = init_flag | IBV_EXP_QP_STATE | IBV_EXP_QP_PORT;
-                #endif
+		#ifdef HAVE_VERBS_EXP
+		exp_flags = init_flag | IBV_EXP_QP_STATE | IBV_EXP_QP_PORT;
+		#endif
 
 	} else if (user_param->connection_type == UD) {
 		attr.qkey = DEFF_QKEY;
@@ -1410,15 +1868,23 @@ int ctx_modify_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_par
 		flags |= IBV_QP_ACCESS_FLAGS;
 	}
 
-        #ifdef HAVE_VERBS_EXP
-        if (init_flag != 0 && user_param->use_rss)
-                ret = ibv_exp_modify_qp(qp,&exp_attr,exp_flags);
-        else
-        #endif
-                ret = ibv_modify_qp(qp,&attr,flags);
+	#ifdef HAVE_MASKED_ATOMICS
+	if (user_param->masked_atomics) {
+		exp_attr.qp_access_flags = IBV_ACCESS_REMOTE_ATOMIC | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ;
+		exp_flags = IBV_EXP_QP_STATE | IBV_EXP_QP_PKEY_INDEX | IBV_EXP_QP_PORT | IBV_EXP_QP_ACCESS_FLAGS;
+	}
+	#endif
+
+	#ifdef HAVE_VERBS_EXP
+	if ( (init_flag != 0 && user_param->use_rss) || user_param->masked_atomics ) {
+		ret = ibv_exp_modify_qp(qp,&exp_attr,exp_flags);
+	}
+	else
+	#endif
+		ret = ibv_modify_qp(qp,&attr,flags);
 
 	if (ret) {
-		fprintf(stderr, "Failed to modify QP to INIT\n");
+		fprintf(stderr, "Failed to modify QP to INIT, ret=%d\n",ret);
 		return 1;
 	}
 	return 0;
@@ -1429,12 +1895,12 @@ int ctx_modify_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_par
  *
  ******************************************************************************/
 static int ctx_modify_dc_qp_to_rtr(struct ibv_qp *qp,
-								struct ibv_exp_qp_attr *attr,
-								struct perftest_parameters *user_param,
-								struct pingpong_dest *dest,
-								struct pingpong_dest *my_dest,
-								int qpindex) {
-
+		struct ibv_exp_qp_attr *attr,
+		struct perftest_parameters *user_param,
+		struct pingpong_dest *dest,
+		struct pingpong_dest *my_dest,
+		int qpindex)
+{
 	int num_of_qps = user_param->num_of_qps;
 	int num_of_qps_per_port = user_param->num_of_qps / 2;
 
@@ -1442,24 +1908,26 @@ static int ctx_modify_dc_qp_to_rtr(struct ibv_qp *qp,
 	attr->qp_state = IBV_QPS_RTR;
 	attr->ah_attr.src_path_bits = 0;
 
-	//in DC with bidirectional,
-	//there are send qps and recv qps. the actual number of send/recv qps
-	//is num_of_qps / 2.
+	/* in DC with bidirectional,
+	 * there are send qps and recv qps. the actual number of send/recv qps
+	 * is num_of_qps / 2.
+	 */
 	if (user_param->duplex || user_param->tst == LAT) {
 		num_of_qps /= 2;
 		num_of_qps_per_port = num_of_qps / 2;
 	}
 
-	// first half of qps are for ib_port and second half are for ib_port2
-	// in DC with bidirectional, the first half of qps are DC_INI qps and
-	// the second half are DC_TGT qps. the first half of the send/recv qps
-	// are for ib_port1 and the second half are for ib_port2
+	/* first half of qps are for ib_port and second half are for ib_port2
+	 * in DC with bidirectional, the first half of qps are DC_INI qps and
+	 * the second half are DC_TGT qps. the first half of the send/recv qps
+	 * are for ib_port1 and the second half are for ib_port2
+	 */
 	if (user_param->dualport == ON && (qpindex % num_of_qps >= num_of_qps_per_port))
 		attr->ah_attr.port_num = user_param->ib_port2;
 	else
 		attr->ah_attr.port_num = user_param->ib_port;
 
-	attr->ah_attr.dlid = dest->lid;
+	attr->ah_attr.dlid = (user_param->dlid) ? user_param->dlid : dest->lid;
 	if (user_param->gid_index == DEF_GID_INDEX) {
 
 		attr->ah_attr.is_global = 0;
@@ -1486,12 +1954,12 @@ static int ctx_modify_dc_qp_to_rtr(struct ibv_qp *qp,
  *
  ******************************************************************************/
 static int ctx_modify_qp_to_rtr(struct ibv_qp *qp,
-								struct ibv_qp_attr *attr,
-								struct perftest_parameters *user_param,
-								struct pingpong_dest *dest,
-								struct pingpong_dest *my_dest,
-								int qpindex) {
-
+		struct ibv_qp_attr *attr,
+		struct perftest_parameters *user_param,
+		struct pingpong_dest *dest,
+		struct pingpong_dest *my_dest,
+		int qpindex)
+{
 	int num_of_qps = user_param->num_of_qps;
 	int num_of_qps_per_port = user_param->num_of_qps / 2;
 
@@ -1499,18 +1967,20 @@ static int ctx_modify_qp_to_rtr(struct ibv_qp *qp,
 	attr->qp_state = IBV_QPS_RTR;
 	attr->ah_attr.src_path_bits = 0;
 
-	//in xrc with bidirectional,
-	//there are send qps and recv qps. the actual number of send/recv qps
-	//is num_of_qps / 2.
+	/* in xrc with bidirectional,
+	 * there are send qps and recv qps. the actual number of send/recv qps
+	 * is num_of_qps / 2.
+	 */
 	if ( user_param->use_xrc && (user_param->duplex || user_param->tst == LAT)) {
 		num_of_qps /= 2;
 		num_of_qps_per_port = num_of_qps / 2;
 	}
 
-	// first half of qps are for ib_port and second half are for ib_port2
-	// in xrc with bidirectional, the first half of qps are xrc_send qps and
-	// the second half are xrc_recv qps. the first half of the send/recv qps
-	// are for ib_port1 and the second half are for ib_port2
+	/* first half of qps are for ib_port and second half are for ib_port2
+	 * in xrc with bidirectional, the first half of qps are xrc_send qps and
+	 * the second half are xrc_recv qps. the first half of the send/recv qps
+	 * are for ib_port1 and the second half are for ib_port2
+	 */
 	if (user_param->dualport == ON && (qpindex % num_of_qps >= num_of_qps_per_port))
 		attr->ah_attr.port_num = user_param->ib_port2;
 	else
@@ -1518,19 +1988,19 @@ static int ctx_modify_qp_to_rtr(struct ibv_qp *qp,
 
 	if (user_param->connection_type != RawEth) {
 
-		attr->ah_attr.dlid = dest->lid;
-		if (user_param->gid_index == DEF_GID_INDEX) {
+		attr->ah_attr.dlid = (user_param->dlid) ? user_param->dlid : dest->lid;
+		attr->ah_attr.sl = user_param->sl;
+
+		if (((attr->ah_attr.port_num == user_param->ib_port) && (user_param->gid_index == DEF_GID_INDEX))
+				|| ((attr->ah_attr.port_num == user_param->ib_port2) && (user_param->gid_index2 == DEF_GID_INDEX) && user_param->dualport)) {
 
 			attr->ah_attr.is_global = 0;
-			attr->ah_attr.sl = user_param->sl;
-
 		} else {
 
 			attr->ah_attr.is_global  = 1;
 			attr->ah_attr.grh.dgid = dest->gid;
-			attr->ah_attr.grh.sgid_index = user_param->gid_index;
+			attr->ah_attr.grh.sgid_index = (attr->ah_attr.port_num == user_param->ib_port) ? user_param->gid_index : user_param->gid_index2;
 			attr->ah_attr.grh.hop_limit = 1;
-			attr->ah_attr.sl = 0;
 		}
 
 		if (user_param->connection_type != UD) {
@@ -1549,7 +2019,7 @@ static int ctx_modify_qp_to_rtr(struct ibv_qp *qp,
 			}
 		}
 	}
-	else if (user_param->raw_qos){
+	else if (user_param->raw_qos) {
 		attr->ah_attr.sl = user_param->sl;
 		flags |= IBV_QP_AV;
 	}
@@ -1561,21 +2031,22 @@ static int ctx_modify_qp_to_rtr(struct ibv_qp *qp,
  *
  ******************************************************************************/
 static int ctx_modify_dc_qp_to_rts(struct ibv_qp *qp,
-							#if defined(HAVE_VERBS_EXP)
-								struct ibv_exp_qp_attr *attr,
-							#else
-								struct ibv_qp_attr_ex *attr,
-							#endif
-								struct perftest_parameters *user_param,
-								struct pingpong_dest *dest,
-								struct pingpong_dest *my_dest)
+		#ifdef HAVE_VERBS_EXP
+		struct ibv_exp_qp_attr *attr,
+		#else
+		struct ibv_qp_attr_ex *attr,
+		#endif
+		struct perftest_parameters *user_param,
+		struct pingpong_dest *dest,
+		struct pingpong_dest *my_dest)
 {
 
-#if defined(HAVE_VERBS_EXP)
-       	int flags = IBV_EXP_QP_STATE | IBV_EXP_QP_TIMEOUT | IBV_EXP_QP_RETRY_CNT | IBV_EXP_QP_RNR_RETRY | IBV_EXP_QP_MAX_QP_RD_ATOMIC;
-#else
+	#ifdef HAVE_VERBS_EXP
+	int flags = IBV_EXP_QP_STATE | IBV_EXP_QP_TIMEOUT | IBV_EXP_QP_RETRY_CNT |
+					 IBV_EXP_QP_RNR_RETRY | IBV_EXP_QP_MAX_QP_RD_ATOMIC;
+	#else
 	int flags = IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_MAX_QP_RD_ATOMIC;
-#endif
+	#endif
 
 	attr->qp_state = IBV_QPS_RTS;
 
@@ -1584,11 +2055,11 @@ static int ctx_modify_dc_qp_to_rts(struct ibv_qp *qp,
 	attr->rnr_retry = 7;
 	attr->max_rd_atomic  = dest->out_reads;
 
-#if defined(HAVE_VERBS_EXP)
+	#ifdef HAVE_VERBS_EXP
 	return ibv_exp_modify_qp(qp,attr,flags);
-#else
+	#else
 	return ibv_modify_qp_ex(qp,attr,flags);
-#endif
+	#endif
 }
 #endif
 
@@ -1596,10 +2067,10 @@ static int ctx_modify_dc_qp_to_rts(struct ibv_qp *qp,
  *
  ******************************************************************************/
 static int ctx_modify_qp_to_rts(struct ibv_qp *qp,
-								struct ibv_qp_attr *attr,
-								struct perftest_parameters *user_param,
-								struct pingpong_dest *dest,
-								struct pingpong_dest *my_dest)
+		struct ibv_qp_attr *attr,
+		struct perftest_parameters *user_param,
+		struct pingpong_dest *dest,
+		struct pingpong_dest *my_dest)
 {
 
 	int flags = IBV_QP_STATE;
@@ -1620,6 +2091,7 @@ static int ctx_modify_qp_to_rts(struct ibv_qp *qp,
 			flags |= (IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_MAX_QP_RD_ATOMIC);
 		}
 	}
+
 	return ibv_modify_qp(qp,attr,flags);
 }
 
@@ -1627,18 +2099,18 @@ static int ctx_modify_qp_to_rts(struct ibv_qp *qp,
  *
  ******************************************************************************/
 int ctx_connect(struct pingpong_context *ctx,
-				struct pingpong_dest *dest,
-				struct perftest_parameters *user_param,
-				struct pingpong_dest *my_dest) {
-
+		struct pingpong_dest *dest,
+		struct perftest_parameters *user_param,
+		struct pingpong_dest *my_dest)
+{
 	int i;
-#ifdef HAVE_DC
-	#if defined(HAVE_VERBS_EXP)
+	#ifdef HAVE_DC
+	#ifdef HAVE_VERBS_EXP
 	struct ibv_exp_qp_attr attr_ex;
 	#else
 	struct ibv_qp_attr_ex attr_ex;
 	#endif
-#endif
+	#endif
 	struct ibv_qp_attr attr;
 	int xrc_offset = 0;
 
@@ -1649,25 +2121,25 @@ int ctx_connect(struct pingpong_context *ctx,
 
 		if (user_param->connection_type == DC) {
 			if ( ((!(user_param->duplex || user_param->tst == LAT) && (user_param->machine == SERVER) )
-										|| ((user_param->duplex || user_param->tst == LAT) && (i >= user_param->num_of_qps/2)))) {
+						|| ((user_param->duplex || user_param->tst == LAT) && (i >= user_param->num_of_qps/2)))) {
 				continue;
 			}
 		}
-	#ifdef HAVE_DC
+		#ifdef HAVE_DC
 		memset(&attr_ex, 0, sizeof attr_ex);
-	#endif
+		#endif
 		memset(&attr, 0, sizeof attr);
 
 		if ( (i >= xrc_offset) && (user_param->use_xrc || user_param->connection_type == DC) && (user_param->duplex || user_param->tst == LAT))
 			xrc_offset = -1*xrc_offset;
 
 		if(user_param->connection_type == DC) {
-		#ifdef HAVE_DC
+			#ifdef HAVE_DC
 			if(ctx_modify_dc_qp_to_rtr(ctx->qp[i],&attr_ex,user_param,&dest[xrc_offset + i],&my_dest[i],i)) {
 				fprintf(stderr, "Failed to modify QP %d to RTR\n",ctx->qp[i]->qp_num);
 				return FAILURE;
 			}
-		#endif
+			#endif
 		} else {
 			if(ctx_modify_qp_to_rtr(ctx->qp[i],&attr,user_param,&dest[xrc_offset + i],&my_dest[i],i)) {
 				fprintf(stderr, "Failed to modify QP %d to RTR\n",ctx->qp[i]->qp_num);
@@ -1677,12 +2149,12 @@ int ctx_connect(struct pingpong_context *ctx,
 
 		if (user_param->tst == LAT || user_param->machine == CLIENT || user_param->duplex) {
 			if(user_param->connection_type == DC) {
-			#ifdef HAVE_DC
+				#ifdef HAVE_DC
 				if(ctx_modify_dc_qp_to_rts(ctx->qp[i],&attr_ex,user_param,&dest[xrc_offset + i],&my_dest[i])) {
 					fprintf(stderr, "Failed to modify QP to RTS\n");
 					return FAILURE;
 				}
-			#endif
+				#endif
 			} else {
 				if(ctx_modify_qp_to_rts(ctx->qp[i],&attr,user_param,&dest[xrc_offset + i],&my_dest[i])) {
 					fprintf(stderr, "Failed to modify QP to RTS\n");
@@ -1691,21 +2163,21 @@ int ctx_connect(struct pingpong_context *ctx,
 			}
 		}
 
-			if ((user_param->connection_type == UD || user_param->connection_type == DC) &&
+		if ((user_param->connection_type == UD || user_param->connection_type == DC) &&
 				(user_param->tst == LAT || user_param->machine == CLIENT || user_param->duplex)) {
 
-				#ifdef HAVE_DC
-				if(user_param->connection_type == DC)
-					ctx->ah[i] = ibv_create_ah(ctx->pd,&(attr_ex.ah_attr));
-				else
-				#endif
-					ctx->ah[i] = ibv_create_ah(ctx->pd,&(attr.ah_attr));
+			#ifdef HAVE_DC
+			if(user_param->connection_type == DC)
+				ctx->ah[i] = ibv_create_ah(ctx->pd,&(attr_ex.ah_attr));
+			else
+			#endif
+				ctx->ah[i] = ibv_create_ah(ctx->pd,&(attr.ah_attr));
 
 
-				if (!ctx->ah[i]) {
-					fprintf(stderr, "Failed to create AH for UD\n");
-					return FAILURE;
-				}
+			if (!ctx->ah[i]) {
+				fprintf(stderr, "Failed to create AH for UD\n");
+				return FAILURE;
+			}
 		}
 
 		if((user_param->use_xrc || user_param->connection_type == DC) && (user_param->duplex || user_param->tst == LAT))
@@ -1719,8 +2191,9 @@ int ctx_connect(struct pingpong_context *ctx,
  *
  ******************************************************************************/
 void ctx_set_send_wqes(struct pingpong_context *ctx,
-					   struct perftest_parameters *user_param,
-					   struct pingpong_dest *rem_dest) {
+		struct perftest_parameters *user_param,
+		struct pingpong_dest *rem_dest)
+{
 
 	#ifdef HAVE_VERBS_EXP
 	if (user_param->use_exp == 1) {
@@ -1735,13 +2208,13 @@ void ctx_set_send_wqes(struct pingpong_context *ctx,
 }
 
 #ifdef HAVE_VERBS_EXP
-
 /******************************************************************************
  *
  ******************************************************************************/
 void ctx_set_send_exp_wqes(struct pingpong_context *ctx,
-					   struct perftest_parameters *user_param,
-					   struct pingpong_dest *rem_dest) {
+		struct perftest_parameters *user_param,
+		struct pingpong_dest *rem_dest)
+{
 	int i,j;
 	int num_of_qps = user_param->num_of_qps;
 	int xrc_offset = 0;
@@ -1752,10 +2225,17 @@ void ctx_set_send_exp_wqes(struct pingpong_context *ctx,
 	}
 
 	for (i = 0; i < num_of_qps ; i++) {
-		memset(&ctx->exp_wr[i],0,sizeof(struct ibv_exp_send_wr));
-		ctx->sge_list[i*user_param->post_list].addr = (uintptr_t)ctx->buf + (i*BUFF_SIZE(ctx->size));
-		if (user_param->mac_fwd)
-			ctx->sge_list[i*user_param->post_list].addr = (uintptr_t)ctx->buf + (num_of_qps + i)*BUFF_SIZE(ctx->size);
+		memset(&ctx->exp_wr[i*user_param->post_list],0,sizeof(struct ibv_exp_send_wr));
+		ctx->sge_list[i*user_param->post_list].addr = (uintptr_t)ctx->buf[i];
+
+		if (user_param->mac_fwd) {
+			if (user_param->mr_per_qp) {
+				ctx->sge_list[i*user_param->post_list].addr = 
+					(uintptr_t)ctx->buf[0] + (num_of_qps + i)*BUFF_SIZE(ctx->size,ctx->cycle_buffer);
+			} else {
+				ctx->sge_list[i*user_param->post_list].addr = (uintptr_t)ctx->buf[i];
+			}
+		}
 
 		if (user_param->verb == WRITE || user_param->verb == READ)
 			ctx->exp_wr[i*user_param->post_list].wr.rdma.remote_addr   = rem_dest[xrc_offset + i].vaddr;
@@ -1767,22 +2247,25 @@ void ctx_set_send_exp_wqes(struct pingpong_context *ctx,
 
 			ctx->scnt[i] = 0;
 			ctx->ccnt[i] = 0;
-			ctx->my_addr[i] = (uintptr_t)ctx->buf + (i*BUFF_SIZE(ctx->size));
+			ctx->my_addr[i] = (uintptr_t)ctx->buf[i];
 			if (user_param->verb != SEND)
 				ctx->rem_addr[i] = rem_dest[xrc_offset + i].vaddr;
 		}
 
 		for (j = 0; j < user_param->post_list; j++) {
 
-			ctx->sge_list[i*user_param->post_list + j].length =  (user_param->connection_type == RawEth) ? (user_param->size - HW_CRC_ADDITION) : user_param->size;
-			ctx->sge_list[i*user_param->post_list + j].lkey = ctx->mr->lkey;
+			ctx->sge_list[i*user_param->post_list + j].length =
+				(user_param->connection_type == RawEth) ? (user_param->size - HW_CRC_ADDITION) : user_param->size;
+
+			ctx->sge_list[i*user_param->post_list + j].lkey = ctx->mr[i]->lkey;
 
 			if (j > 0) {
 
 				ctx->sge_list[i*user_param->post_list +j].addr = ctx->sge_list[i*user_param->post_list + (j-1)].addr;
 
-				if ((user_param->tst == BW ) && user_param->size <= (cycle_buffer / 2))
-					increase_loc_addr(&ctx->sge_list[i*user_param->post_list +j],user_param->size,j-1,ctx->my_addr[i],0);
+				if ((user_param->tst == BW ) && user_param->size <= (ctx->cycle_buffer / 2))
+					increase_loc_addr(&ctx->sge_list[i*user_param->post_list +j],user_param->size,
+							j-1,ctx->my_addr[i],0,ctx->cache_line_size,ctx->cycle_buffer);
 			}
 
 			ctx->exp_wr[i*user_param->post_list + j].sg_list = &ctx->sge_list[i*user_param->post_list + j];
@@ -1790,7 +2273,13 @@ void ctx_set_send_exp_wqes(struct pingpong_context *ctx,
 			ctx->exp_wr[i*user_param->post_list + j].wr_id   = i;
 
 			if (j == (user_param->post_list - 1)) {
-				ctx->exp_wr[i*user_param->post_list + j].exp_send_flags = IBV_EXP_SEND_SIGNALED;
+				#ifdef HAVE_ACCL_VERBS
+				if (user_param->verb_type == ACCL_INTF)
+					ctx->exp_wr[i*user_param->post_list + j].exp_send_flags = IBV_EXP_QP_BURST_SIGNALED;
+				else
+				#endif
+					ctx->exp_wr[i*user_param->post_list + j].exp_send_flags = IBV_EXP_SEND_SIGNALED;
+
 				ctx->exp_wr[i*user_param->post_list + j].next = NULL;
 			}
 
@@ -1813,8 +2302,9 @@ void ctx_set_send_exp_wqes(struct pingpong_context *ctx,
 
 					ctx->exp_wr[i*user_param->post_list + j].wr.rdma.remote_addr = ctx->exp_wr[i*user_param->post_list + (j-1)].wr.rdma.remote_addr;
 
-					if ((user_param->tst == BW) && user_param->size <= (cycle_buffer / 2))
-						increase_exp_rem_addr(&ctx->exp_wr[i*user_param->post_list + j],user_param->size,j-1,ctx->rem_addr[i],WRITE);
+					if ((user_param->tst == BW) && user_param->size <= (ctx->cycle_buffer / 2))
+						increase_exp_rem_addr(&ctx->exp_wr[i*user_param->post_list + j],user_param->size,
+								j-1,ctx->rem_addr[i],WRITE,ctx->cache_line_size,ctx->cycle_buffer);
 				}
 
 			} else if (user_param->verb == ATOMIC) {
@@ -1825,7 +2315,8 @@ void ctx_set_send_exp_wqes(struct pingpong_context *ctx,
 
 					ctx->exp_wr[i*user_param->post_list + j].wr.atomic.remote_addr = ctx->exp_wr[i*user_param->post_list + j-1].wr.atomic.remote_addr;
 					if ((user_param->tst == BW))
-						increase_exp_rem_addr(&ctx->exp_wr[i*user_param->post_list + j],user_param->size,j-1,ctx->rem_addr[i],ATOMIC);
+						increase_exp_rem_addr(&ctx->exp_wr[i*user_param->post_list + j],user_param->size,
+								j-1,ctx->rem_addr[i],ATOMIC,ctx->cache_line_size,ctx->cycle_buffer);
 				}
 
 				if (user_param->atomicType == FETCH_AND_ADD)
@@ -1860,21 +2351,21 @@ void ctx_set_send_exp_wqes(struct pingpong_context *ctx,
 			}
 
 			#ifdef HAVE_DC
-				if (user_param->connection_type == DC) {
-					ctx->exp_wr[i*user_param->post_list + j].dc.ah = ctx->ah[i];
-					ctx->exp_wr[i*user_param->post_list + j].dc.dct_access_key = user_param->dct_key;
-					ctx->exp_wr[i*user_param->post_list + j].dc.dct_number = rem_dest[xrc_offset + i].qpn;
-				}
+			if (user_param->connection_type == DC) {
+				ctx->exp_wr[i*user_param->post_list + j].dc.ah = ctx->ah[i];
+				ctx->exp_wr[i*user_param->post_list + j].dc.dct_access_key = user_param->dct_key;
+				ctx->exp_wr[i*user_param->post_list + j].dc.dct_number = rem_dest[xrc_offset + i].qpn;
+			}
 			#endif
 
 
 			if ((user_param->verb == SEND || user_param->verb == WRITE) && user_param->size <= user_param->inline_size)
 				ctx->exp_wr[i*user_param->post_list + j].exp_send_flags |= IBV_EXP_SEND_INLINE;
 
-		#ifdef HAVE_XRCD
+			#ifdef HAVE_XRCD
 			if (user_param->use_xrc)
 				ctx->exp_wr[i*user_param->post_list + j].qp_type.xrc.remote_srqn = rem_dest[xrc_offset + i].srqn;
-		#endif
+			#endif
 		}
 	}
 }
@@ -1884,9 +2375,9 @@ void ctx_set_send_exp_wqes(struct pingpong_context *ctx,
  *
  ******************************************************************************/
 void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
-					   struct perftest_parameters *user_param,
-					   struct pingpong_dest *rem_dest) {
-
+		struct perftest_parameters *user_param,
+		struct pingpong_dest *rem_dest)
+{
 	int i,j;
 	int num_of_qps = user_param->num_of_qps;
 	int xrc_offset = 0;
@@ -1897,10 +2388,17 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 	}
 
 	for (i = 0; i < num_of_qps ; i++) {
-		memset(&ctx->wr[i],0,sizeof(struct ibv_send_wr));
-		ctx->sge_list[i*user_param->post_list].addr = (uintptr_t)ctx->buf + (i*BUFF_SIZE(ctx->size));
-		if (user_param->mac_fwd)
-			ctx->sge_list[i*user_param->post_list].addr = (uintptr_t)ctx->buf + (num_of_qps + i)*BUFF_SIZE(ctx->size);
+		memset(&ctx->wr[i*user_param->post_list],0,sizeof(struct ibv_send_wr));
+		ctx->sge_list[i*user_param->post_list].addr = (uintptr_t)ctx->buf[i];
+
+		if (user_param->mac_fwd) {
+			if (user_param->mr_per_qp) {
+				ctx->sge_list[i*user_param->post_list].addr =
+					(uintptr_t)ctx->buf[0] + (num_of_qps + i)*BUFF_SIZE(ctx->size,ctx->cycle_buffer);
+			} else {
+				ctx->sge_list[i*user_param->post_list].addr = (uintptr_t)ctx->buf[i];
+			}
+		}
 
 		if (user_param->verb == WRITE || user_param->verb == READ)
 			ctx->wr[i*user_param->post_list].wr.rdma.remote_addr   = rem_dest[xrc_offset + i].vaddr;
@@ -1912,22 +2410,25 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 
 			ctx->scnt[i] = 0;
 			ctx->ccnt[i] = 0;
-			ctx->my_addr[i] = (uintptr_t)ctx->buf + (i*BUFF_SIZE(ctx->size));
+			ctx->my_addr[i] = (uintptr_t)ctx->buf[i];
 			if (user_param->verb != SEND)
 				ctx->rem_addr[i] = rem_dest[xrc_offset + i].vaddr;
 		}
 
 		for (j = 0; j < user_param->post_list; j++) {
 
-			ctx->sge_list[i*user_param->post_list + j].length =  (user_param->connection_type == RawEth) ? (user_param->size - HW_CRC_ADDITION) : user_param->size;
-			ctx->sge_list[i*user_param->post_list + j].lkey = ctx->mr->lkey;
+			ctx->sge_list[i*user_param->post_list + j].length =
+				(user_param->connection_type == RawEth) ? (user_param->size - HW_CRC_ADDITION) : user_param->size;
+
+			ctx->sge_list[i*user_param->post_list + j].lkey = ctx->mr[i]->lkey;
 
 			if (j > 0) {
 
 				ctx->sge_list[i*user_param->post_list +j].addr = ctx->sge_list[i*user_param->post_list + (j-1)].addr;
 
-				if ((user_param->tst == BW ) && user_param->size <= (cycle_buffer / 2))
-					increase_loc_addr(&ctx->sge_list[i*user_param->post_list +j],user_param->size,j-1,ctx->my_addr[i],0);
+				if ((user_param->tst == BW ) && user_param->size <= (ctx->cycle_buffer / 2))
+					increase_loc_addr(&ctx->sge_list[i*user_param->post_list +j],user_param->size,
+							j-1,ctx->my_addr[i],0,ctx->cache_line_size,ctx->cycle_buffer);
 			}
 
 			ctx->wr[i*user_param->post_list + j].sg_list = &ctx->sge_list[i*user_param->post_list + j];
@@ -1956,10 +2457,12 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 
 				if (j > 0) {
 
-					ctx->wr[i*user_param->post_list + j].wr.rdma.remote_addr = ctx->wr[i*user_param->post_list + (j-1)].wr.rdma.remote_addr;
+					ctx->wr[i*user_param->post_list + j].wr.rdma.remote_addr =
+						ctx->wr[i*user_param->post_list + (j-1)].wr.rdma.remote_addr;
 
-					if ((user_param->tst == BW) && user_param->size <= (cycle_buffer / 2))
-						increase_rem_addr(&ctx->wr[i*user_param->post_list + j],user_param->size,j-1,ctx->rem_addr[i],WRITE);
+					if ((user_param->tst == BW) && user_param->size <= (ctx->cycle_buffer / 2))
+						increase_rem_addr(&ctx->wr[i*user_param->post_list + j],user_param->size,
+								j-1,ctx->rem_addr[i],WRITE,ctx->cache_line_size,ctx->cycle_buffer);
 				}
 
 			} else if (user_param->verb == ATOMIC) {
@@ -1968,9 +2471,11 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 
 				if (j > 0) {
 
-					ctx->wr[i*user_param->post_list + j].wr.atomic.remote_addr = ctx->wr[i*user_param->post_list + j-1].wr.atomic.remote_addr;
+					ctx->wr[i*user_param->post_list + j].wr.atomic.remote_addr =
+						ctx->wr[i*user_param->post_list + j-1].wr.atomic.remote_addr;
 					if ((user_param->tst == BW))
-						increase_rem_addr(&ctx->wr[i*user_param->post_list + j],user_param->size,j-1,ctx->rem_addr[i],ATOMIC);
+						increase_rem_addr(&ctx->wr[i*user_param->post_list + j],user_param->size,
+								j-1,ctx->rem_addr[i],ATOMIC,ctx->cache_line_size,ctx->cycle_buffer);
 				}
 
 				if (user_param->atomicType == FETCH_AND_ADD)
@@ -2000,10 +2505,10 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 			if ((user_param->verb == SEND || user_param->verb == WRITE) && user_param->size <= user_param->inline_size)
 				ctx->wr[i*user_param->post_list + j].send_flags |= IBV_SEND_INLINE;
 
-		#ifdef HAVE_XRCD
+			#ifdef HAVE_XRCD
 			if (user_param->use_xrc)
 				ctx->wr[i*user_param->post_list + j].qp_type.xrc.remote_srqn = rem_dest[xrc_offset + i].srqn;
-		#endif
+			#endif
 		}
 	}
 }
@@ -2011,35 +2516,40 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 /******************************************************************************
  *
  ******************************************************************************/
-int ctx_set_recv_wqes(struct pingpong_context *ctx,struct perftest_parameters *user_param) {
+int ctx_set_recv_wqes(struct pingpong_context *ctx,struct perftest_parameters *user_param)
+{
+	int			i = 0,j,k;
+	int			num_of_qps = user_param->num_of_qps;
+	struct ibv_recv_wr	*bad_wr_recv;
+	int			size_per_qp = user_param->rx_depth;
 
-	int	i,j,k;
-	int num_of_qps = user_param->num_of_qps;
-	struct ibv_recv_wr  *bad_wr_recv;
-	i = 0;
-	int size_per_qp = user_param->rx_depth;
+	if((user_param->use_xrc || user_param->connection_type == DC) &&
+				(user_param->duplex || user_param->tst == LAT)) {
 
-	if((user_param->use_xrc || user_param->connection_type == DC) && (user_param->duplex || user_param->tst == LAT)) {
 		i = user_param->num_of_qps / 2;
 		num_of_qps /= 2;
 	}
 
 	if (user_param->use_srq)
-			size_per_qp /= user_param->num_of_qps;
+		size_per_qp /= user_param->num_of_qps;
 
 	if (user_param->use_rss) {
 		i = 1;
 		num_of_qps = 1;
 	}
 	for (k = 0; i < user_param->num_of_qps; i++,k++) {
-
-		ctx->recv_sge_list[i].addr  = (uintptr_t)ctx->buf + (num_of_qps + k)*BUFF_SIZE(ctx->size);
+		if (!user_param->mr_per_qp) {
+			ctx->recv_sge_list[i].addr  = (uintptr_t)ctx->buf[0] +
+				(num_of_qps + k)*BUFF_SIZE(ctx->size,ctx->cycle_buffer);
+		} else {
+			ctx->recv_sge_list[i].addr  = (uintptr_t)ctx->buf[i];
+		}
 
 		if (user_param->connection_type == UD)
-			ctx->recv_sge_list[i].addr += (CACHE_LINE_SIZE - UD_ADDITION);
+			ctx->recv_sge_list[i].addr += (ctx->cache_line_size - UD_ADDITION);
 
 		ctx->recv_sge_list[i].length = SIZE(user_param->connection_type,user_param->size,1);
-		ctx->recv_sge_list[i].lkey   = ctx->mr->lkey;
+		ctx->recv_sge_list[i].lkey   = ctx->mr[i]->lkey;
 
 		ctx->rwr[i].sg_list = &ctx->recv_sge_list[i];
 		ctx->rwr[i].wr_id   = i;
@@ -2066,13 +2576,13 @@ int ctx_set_recv_wqes(struct pingpong_context *ctx,struct perftest_parameters *u
 				}
 			}
 
-			if ((user_param->tst == BW) && user_param->size <= (cycle_buffer / 2)) {
+			if ((user_param->tst == BW) && user_param->size <= (ctx->cycle_buffer / 2)) {
 
 				increase_loc_addr(&ctx->recv_sge_list[i],
-								  user_param->size,
-								  j,
-								  ctx->rx_buffer_addr[i],
-								  user_param->connection_type);
+						user_param->size,
+						j,
+						ctx->rx_buffer_addr[i],
+						user_param->connection_type,ctx->cache_line_size,ctx->cycle_buffer);
 			}
 		}
 	}
@@ -2080,8 +2590,8 @@ int ctx_set_recv_wqes(struct pingpong_context *ctx,struct perftest_parameters *u
 }
 
 int ctx_alloc_credit(struct pingpong_context *ctx,
-			struct perftest_parameters *user_param,
-			struct pingpong_dest *my_dest)
+		struct perftest_parameters *user_param,
+		struct pingpong_dest *my_dest)
 {
 	int buf_size = 2*user_param->num_of_qps*sizeof(uint32_t);
 	int flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE;
@@ -2107,8 +2617,8 @@ int ctx_alloc_credit(struct pingpong_context *ctx,
 
 /* Should be called after the remote keys have been exchanged */
 int ctx_set_credit_wqes(struct pingpong_context *ctx,
-			struct perftest_parameters *user_param,
-			struct pingpong_dest *rem_dest)
+		struct perftest_parameters *user_param,
+		struct pingpong_dest *rem_dest)
 {
 	int i;
 	ALLOCATE(ctx->ctrl_wr,struct ibv_send_wr,user_param->num_of_qps);
@@ -2136,9 +2646,9 @@ int ctx_set_credit_wqes(struct pingpong_context *ctx,
 
 static int clean_scq_credit(int send_cnt,struct pingpong_context *ctx,struct perftest_parameters *user_param)
 {
-	int i= 0, sne = 0;
-	struct ibv_wc *swc = NULL;
-
+	int 		i= 0, sne = 0;
+	struct ibv_wc 	*swc = NULL;
+	int		return_value = 0;
 	if (!send_cnt)
 		return 0;
 
@@ -2149,36 +2659,40 @@ static int clean_scq_credit(int send_cnt,struct pingpong_context *ctx,struct per
 			for (i = 0; i < sne; i++) {
 				if (swc[i].status != IBV_WC_SUCCESS) {
 					fprintf(stderr, "Poll send CQ error status=%u qp %d\n",
-						swc[i].status,(int)swc[i].wr_id);
-					return 1;
+							swc[i].status,(int)swc[i].wr_id);
+					return_value = 1;
+					goto cleaning;
 				}
 				send_cnt--;
 			}
 
 		} else if (sne < 0) {
 			fprintf(stderr, "Poll send CQ to clean credit failed ne=%d\n",sne);
-			return 1;
+			return_value = 1;
+			goto cleaning;
 		}
 	} while(send_cnt > 0);
 
+cleaning:
 	free(swc);
-	return 0;
+	return return_value;
 }
 
 /******************************************************************************
  *
  ******************************************************************************/
-int perform_warm_up(struct pingpong_context *ctx,struct perftest_parameters *user_param) {
-
-	int ne,index,warmindex,warmupsession;
-	int err = 0;
-#if defined(HAVE_VERBS_EXP)
-	struct ibv_exp_send_wr *bad_exp_wr = NULL;
-#endif
-	struct ibv_send_wr *bad_wr = NULL;
-	struct ibv_wc wc;
-	struct ibv_wc *wc_for_cleaning = NULL;
-	int num_of_qps = user_param->num_of_qps;
+int perform_warm_up(struct pingpong_context *ctx,struct perftest_parameters *user_param)
+{
+	int 			ne,index,warmindex,warmupsession;
+	int 			err = 0;
+	#ifdef HAVE_VERBS_EXP
+	struct ibv_exp_send_wr 	*bad_exp_wr = NULL;
+	#endif
+	struct ibv_send_wr 	*bad_wr = NULL;
+	struct ibv_wc 		wc;
+	struct ibv_wc 		*wc_for_cleaning = NULL;
+	int 			num_of_qps = user_param->num_of_qps;
+	int			return_value = 0;
 
 	if(user_param->duplex && (user_param->use_xrc || user_param->connection_type == DC))
 		num_of_qps /= 2;
@@ -2186,25 +2700,28 @@ int perform_warm_up(struct pingpong_context *ctx,struct perftest_parameters *use
 	warmupsession = (user_param->post_list == 1) ? user_param->tx_depth : user_param->post_list;
 	ALLOCATE(wc_for_cleaning,struct ibv_wc,user_param->tx_depth);
 
-	// Clean up the pipe
+	/* Clean up the pipe */
 	ne = ibv_poll_cq(ctx->send_cq,user_param->tx_depth,wc_for_cleaning);
 
 	for (index=0 ; index < num_of_qps ; index++) {
 
 		for (warmindex = 0 ;warmindex < warmupsession ;warmindex += user_param->post_list) {
 
-	    		#if defined(HAVE_VERBS_EXP)
-				if (user_param->use_exp == 1)
-            		err = (ctx->exp_post_send_func_pointer)(ctx->qp[index],&ctx->exp_wr[index*user_param->post_list],&bad_exp_wr);
-				else
-					err = (ctx->post_send_func_pointer)(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
-            	#else
-            		err = ibv_post_send(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
-            	#endif
-				if (err) {
-            		fprintf(stderr,"Couldn't post send during warm up: qp %d scnt=%d \n",index,warmindex);
-            		return 1;
-        		}
+			#ifdef HAVE_VERBS_EXP
+			if (user_param->use_exp == 1)
+				err = (ctx->exp_post_send_func_pointer)(ctx->qp[index],
+					&ctx->exp_wr[index*user_param->post_list], &bad_exp_wr);
+			else
+				err = (ctx->post_send_func_pointer)(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
+			#else
+			err = ibv_post_send(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
+			#endif
+
+			if (err) {
+				fprintf(stderr,"Couldn't post send during warm up: qp %d scnt=%d \n",index,warmindex);
+				return_value = 1;
+				goto cleaning;
+			}
 		}
 
 		do {
@@ -2212,49 +2729,57 @@ int perform_warm_up(struct pingpong_context *ctx,struct perftest_parameters *use
 			ne = ibv_poll_cq(ctx->send_cq,1,&wc);
 			if (ne > 0) {
 
-				if (wc.status != IBV_WC_SUCCESS)
-					return 1;
+				if (wc.status != IBV_WC_SUCCESS) {
+					return_value = 1;
+					goto cleaning;
+				}
 
 				warmindex -= user_param->post_list;
 
-			} else if (ne < 0)
-				return 1;
+			} else if (ne < 0) {
+				return_value = 1;
+				goto cleaning;
+			}
 
 		} while (warmindex);
-
 	}
+
+cleaning:
 	free(wc_for_cleaning);
-	return 0;
+	return return_value;
 }
 
 /******************************************************************************
  *
  ******************************************************************************/
-int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_param) {
-
-	uint64_t           totscnt = 0;
-	uint64_t       	   totccnt = 0;
-	int                i = 0;
-	int                index,ne;
-	uint64_t	   tot_iters;
-	int				   err = 0;
-#if defined(HAVE_VERBS_EXP)
-	struct ibv_exp_send_wr *bad_exp_wr = NULL;
-#endif
-	struct ibv_send_wr *bad_wr = NULL;
-	struct ibv_wc 	   *wc = NULL;
-	int num_of_qps = user_param->num_of_qps;
+int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_param)
+{
+	uint64_t           	totscnt = 0;
+	uint64_t       	   	totccnt = 0;
+	int                	i = 0;
+	int                	index,ne;
+	uint64_t	   	tot_iters;
+	int			err = 0;
+	#ifdef HAVE_VERBS_EXP
+	struct ibv_exp_send_wr 	*bad_exp_wr = NULL;
+	#endif
+	struct ibv_send_wr 	*bad_wr = NULL;
+	struct ibv_wc 	   	*wc = NULL;
+	int 			num_of_qps = user_param->num_of_qps;
 
 	/* Rate Limiter*/
-	int rate_limit_pps = 0;
-	double gap_time = 0;	//in usec
-	cycles_t gap_cycles = 0;	//in cycles
-	cycles_t gap_deadline = 0;
-	unsigned int number_of_bursts = 0;
-	int burst_iter = 0;
-	int is_sending_burst = 0;
-	int cpu_mhz = 0;
-	/**/
+	int 			rate_limit_pps = 0;
+	double 			gap_time = 0;	/* in usec */
+	cycles_t 		gap_cycles = 0;	/* in cycles */
+	cycles_t 		gap_deadline = 0;
+	unsigned int 		number_of_bursts = 0;
+	int 			burst_iter = 0;
+	int 			is_sending_burst = 0;
+	int 			cpu_mhz = 0;
+	int 			return_value = 0;
+	int			wc_id;
+	int pl_index;
+	struct ibv_sge		*sg_l;
 
 	ALLOCATE(wc ,struct ibv_wc ,CTX_POLL_BATCH);
 
@@ -2265,42 +2790,44 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 		if (user_param->margin > 0 )
 			alarm(user_param->margin);
 		else
-			catch_alarm(0); //move to next state
+			catch_alarm(0); /* move to next state */
 
 		user_param->iters = 0;
 	}
 
-	// Will be 0, in case of Duration (look at force_dependencies or in the exp above).
 	if (user_param->duplex && (user_param->use_xrc || user_param->connection_type == DC))
 		num_of_qps /= 2;
 
-	tot_iters = user_param->iters*num_of_qps;
+	/* Will be 0, in case of Duration (look at force_dependencies or in the exp above). */
+	tot_iters = (uint64_t)user_param->iters*num_of_qps;
 
 	if (user_param->test_type == DURATION && user_param->state != START_STATE && user_param->margin > 0) {
 		fprintf(stderr, "Failed: margin is not long enough (taking samples before warmup ends)\n");
 		fprintf(stderr, "Please increase margin or decrease tx_depth\n");
-		return 1;
+		return_value = 1;
+		goto cleaning;
 	}
 
 	if (user_param->test_type == ITERATIONS && user_param->noPeak == ON)
 		user_param->tposted[0] = get_cycles();
 
-	// If using rate limiter, calculate gap time between bursts
+	/* If using rate limiter, calculate gap time between bursts */
 	if (user_param->is_rate_limiting == 1) {
-		// Calculate rate limit in pps
+		/* Calculate rate limit in pps */
 		switch (user_param->rate_units) {
 			case MEGA_BYTE_PS:
-				rate_limit_pps = ((double)(user_param->rate_limit) / user_param->size) * 1048576;		//1024^2
+				rate_limit_pps = ((double)(user_param->rate_limit) / user_param->size) * 1048576;
 				break;
 			case GIGA_BIT_PS:
-				rate_limit_pps = ((double)(user_param->rate_limit) / (user_param->size * 8)) * 1000000000;	//1000^3
+				rate_limit_pps = ((double)(user_param->rate_limit) / (user_param->size * 8)) * 1000000000;
 				break;
 			case PACKET_PS:
 				rate_limit_pps = user_param->rate_limit;
 				break;
 			default:
 				fprintf(stderr, " Failed: Unknown rate limit units\n");
-				return 1;
+				return_value = 1;
+				goto cleaning;
 		}
 		cpu_mhz = get_cpu_mhz(user_param->cpu_freq_f);
 		if (cpu_mhz <= 0) {
@@ -2311,15 +2838,16 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 		gap_cycles = cpu_mhz * gap_time;
 	}
 
-	// main loop for posting
-	while (totscnt < tot_iters  || totccnt < tot_iters || (user_param->test_type == DURATION && user_param->state != END_STATE) ) {
+	/* main loop for posting */
+	while (totscnt < tot_iters  || totccnt < tot_iters ||
+		(user_param->test_type == DURATION && user_param->state != END_STATE) ) {
 
-		// main loop to run over all the qps and post each time n messages
+		/* main loop to run over all the qps and post each time n messages */
 		for (index =0 ; index < num_of_qps ; index++) {
 
 			if (user_param->is_rate_limiting == 1 && is_sending_burst == 0) {
 				if (gap_deadline > get_cycles()) {
-					//Go right to cq polling until gap time is over.
+					/* Go right to cq polling until gap time is over. */
 					continue;
 				}
 				gap_deadline = get_cycles() + gap_cycles;
@@ -2328,20 +2856,29 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 			}
 
 			while ((ctx->scnt[index] < user_param->iters || user_param->test_type == DURATION) && (ctx->scnt[index] - ctx->ccnt[index]) < (user_param->tx_depth) &&
-				!(user_param->is_rate_limiting && is_sending_burst == 0)) {
-
+					!(user_param->is_rate_limiting && is_sending_burst == 0)) {
 				if (ctx->send_rcredit) {
 					uint32_t swindow = ctx->scnt[index] + user_param->post_list - ctx->credit_buf[index];
 					if (swindow >= user_param->rx_depth)
 						break;
 				}
-				if (user_param->post_list == 1 && (ctx->scnt[index] % user_param->cq_mod == 0 && user_param->cq_mod > 1)) {
+				if (user_param->post_list == 1 && (ctx->scnt[index] % user_param->cq_mod == 0 && user_param->cq_mod > 1)
+					&& !(ctx->scnt[index] == (user_param->iters - 1) && user_param->test_type == ITERATIONS)) {
+
 					#ifdef HAVE_VERBS_EXP
-					if (user_param->use_exp == 1)
-						ctx->exp_wr[index].exp_send_flags &= ~IBV_EXP_SEND_SIGNALED;
-					else
+					#ifdef HAVE_ACCL_VERBS
+					if (user_param->verb_type == ACCL_INTF)
+						ctx->exp_wr[index].exp_send_flags &= ~IBV_EXP_QP_BURST_SIGNALED;
+					else {
 					#endif
-						ctx->wr[index].send_flags &= ~IBV_SEND_SIGNALED;
+						if (user_param->use_exp == 1)
+							ctx->exp_wr[index].exp_send_flags &= ~IBV_EXP_SEND_SIGNALED;
+						else
+					#endif
+							ctx->wr[index].send_flags &= ~IBV_SEND_SIGNALED;
+					#ifdef HAVE_ACCL_VERBS
+					}
+					#endif
 				}
 
 				if (user_param->noPeak == OFF)
@@ -2350,53 +2887,85 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 				if (user_param->test_type == DURATION && user_param->state == END_STATE)
 					break;
 
-				#if defined(HAVE_VERBS_EXP)
-				if (user_param->use_exp == 1) {
-            				err = (ctx->exp_post_send_func_pointer)(ctx->qp[index],&ctx->exp_wr[index*user_param->post_list],&bad_exp_wr);
+				#ifdef HAVE_VERBS_EXP
+				#ifdef HAVE_ACCL_VERBS
+				if (user_param->verb_type == ACCL_INTF) {
+					for (pl_index = 0; pl_index < user_param->post_list; pl_index++) {
+						sg_l = ctx->exp_wr[index*user_param->post_list + pl_index].sg_list;
+						ctx->qp_burst_family[index]->send_pending(ctx->qp[index], sg_l->addr, sg_l->length, sg_l->lkey,
+												ctx->exp_wr[index*user_param->post_list + pl_index].exp_send_flags);
+					}
+					ctx->qp_burst_family[index]->send_flush(ctx->qp[index]);
+				} else {
+				#endif
+					if (user_param->use_exp == 1) {
+						err = (ctx->exp_post_send_func_pointer)(ctx->qp[index],
+							&ctx->exp_wr[index*user_param->post_list],&bad_exp_wr);
+					}
+					else {
+						err = (ctx->post_send_func_pointer)(ctx->qp[index],
+							&ctx->wr[index*user_param->post_list],&bad_wr);
+					}
+				#ifdef HAVE_ACCL_VERBS
 				}
-				else {
-					err = (ctx->post_send_func_pointer)(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
-				}
+				#endif
 				#else
-					err = ibv_post_send(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
+				err = ibv_post_send(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
 				#endif
 				if (err) {
-            				fprintf(stderr,"Couldn't post send: qp %d scnt=%lu \n",index,ctx->scnt[index]);
-            				return 1;
-        			}
+					fprintf(stderr,"Couldn't post send: qp %d scnt=%lu \n",index,ctx->scnt[index]);
+					return_value = 1;
+					goto cleaning;
+				}
 
-				if (user_param->post_list == 1 && user_param->size <= (cycle_buffer / 2)) {
+				if (user_param->post_list == 1 && user_param->size <= (ctx->cycle_buffer / 2)) {
+					#ifdef HAVE_VERBS_EXP
+					if (user_param->use_exp == 1)
+						increase_loc_addr(ctx->exp_wr[index].sg_list,user_param->size,
+								ctx->scnt[index],ctx->my_addr[index],0,ctx->cache_line_size,ctx->cycle_buffer);
+					else
+					#endif
+						increase_loc_addr(ctx->wr[index].sg_list,user_param->size,ctx->scnt[index],
+								ctx->my_addr[index],0,ctx->cache_line_size,ctx->cycle_buffer);
+
+					if (user_param->verb != SEND) {
 						#ifdef HAVE_VERBS_EXP
 						if (user_param->use_exp == 1)
-							increase_loc_addr(ctx->exp_wr[index].sg_list,user_param->size,ctx->scnt[index],ctx->my_addr[index],0);
+							increase_exp_rem_addr(&ctx->exp_wr[index],user_param->size,
+									ctx->scnt[index],ctx->rem_addr[index],user_param->verb,ctx->cache_line_size,
+									ctx->cycle_buffer);
 						else
 						#endif
-							increase_loc_addr(ctx->wr[index].sg_list,user_param->size,ctx->scnt[index],ctx->my_addr[index],0);
-
-						if (user_param->verb != SEND) {
-							#ifdef HAVE_VERBS_EXP
-							if (user_param->use_exp == 1)
-								increase_exp_rem_addr(&ctx->exp_wr[index],user_param->size,ctx->scnt[index],ctx->rem_addr[index],user_param->verb);
-							else
-							#endif
-								increase_rem_addr(&ctx->wr[index],user_param->size,ctx->scnt[index],ctx->rem_addr[index],user_param->verb);
-						}
+							increase_rem_addr(&ctx->wr[index],user_param->size,
+									ctx->scnt[index],ctx->rem_addr[index],user_param->verb,ctx->cache_line_size,
+									ctx->cycle_buffer);
+					}
 				}
 
 				ctx->scnt[index] += user_param->post_list;
 				totscnt += user_param->post_list;
 
+				/* ask for completion on this wr */
 				if (user_param->post_list == 1 &&
-				   (ctx->scnt[index]%user_param->cq_mod == user_param->cq_mod - 1 || (user_param->test_type == ITERATIONS && ctx->scnt[index] == user_param->iters - 1))) {
+						(ctx->scnt[index]%user_param->cq_mod == user_param->cq_mod - 1 ||
+							(user_param->test_type == ITERATIONS && ctx->scnt[index] == user_param->iters - 1))) {
 					#ifdef HAVE_VERBS_EXP
-					if (user_param->use_exp == 1)
-						ctx->exp_wr[index].exp_send_flags |= IBV_EXP_SEND_SIGNALED;
-					else
+					#ifdef HAVE_ACCL_VERBS
+					if (user_param->verb_type == ACCL_INTF)
+						ctx->exp_wr[index].exp_send_flags |= IBV_EXP_QP_BURST_SIGNALED;
+					else {
 					#endif
-						ctx->wr[index].send_flags |= IBV_SEND_SIGNALED;
+						if (user_param->use_exp == 1)
+							ctx->exp_wr[index].exp_send_flags |= IBV_EXP_SEND_SIGNALED;
+						else
+					#endif
+							ctx->wr[index].send_flags |= IBV_SEND_SIGNALED;
+					#ifdef HAVE_ACCL_VERBS
+					}
+					#endif
 				}
 
-				// Check if a full burst was sent.
+				/* Check if a full burst was sent. */
 				if (user_param->is_rate_limiting == 1) {
 					burst_iter += user_param->post_list;
 					if (burst_iter >= user_param->burst_size) {
@@ -2410,19 +2979,32 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 			if (user_param->use_event) {
 				if (ctx_notify_events(ctx->channel)) {
 					fprintf(stderr, "Couldn't request CQ notification\n");
-					return 1;
+					return_value = 1;
+					goto cleaning;
 				}
 			}
 
-			ne = ibv_poll_cq(ctx->send_cq,CTX_POLL_BATCH,wc);
+			#ifdef HAVE_ACCL_VERBS
+			if (user_param->verb_type == ACCL_INTF)
+				ne = ctx->send_cq_family->poll_cnt(ctx->send_cq, CTX_POLL_BATCH);
+			else
+			#endif
+				ne = ibv_poll_cq(ctx->send_cq,CTX_POLL_BATCH,wc);
 
 			if (ne > 0) {
 				for (i = 0; i < ne; i++) {
-					if (wc[i].status != IBV_WC_SUCCESS)
-					{
-						NOTIFY_COMP_ERROR_SEND(wc[i],totscnt,totccnt);
+					wc_id = (user_param->verb_type == ACCL_INTF) ?
+						0 : (int)wc[i].wr_id;
+
+					if (user_param->verb_type != ACCL_INTF) {
+						if (wc[i].status != IBV_WC_SUCCESS) {
+							NOTIFY_COMP_ERROR_SEND(wc[i],totscnt,totccnt);
+							return_value = 1;
+							goto cleaning;
+						}
 					}
-					ctx->ccnt[(int)wc[i].wr_id] += user_param->cq_mod;
+
+					ctx->ccnt[wc_id] += user_param->cq_mod;
 					totccnt += user_param->cq_mod;
 
 					if (user_param->noPeak == OFF) {
@@ -2433,13 +3015,18 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 							user_param->tcompleted[totccnt-1] = get_cycles();
 					}
 
-					if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE)
+					if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE) {
+						if (user_param->report_per_port) {
+							user_param->iters_per_port[user_param->port_by_qp[wc_id]] += user_param->cq_mod;
+						}
 						user_param->iters += user_param->cq_mod;
+					}
 				}
 
 			} else if (ne < 0) {
 				fprintf(stderr, "poll CQ failed %d\n",ne);
-				return 1;
+				return_value = 1;
+				goto cleaning;
 			}
 		}
 	}
@@ -2447,8 +3034,10 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 	if (user_param->noPeak == ON && user_param->test_type == ITERATIONS)
 		user_param->tcompleted[0] = get_cycles();
 
+cleaning:
+
 	free(wc);
-	return 0;
+	return return_value;
 }
 
 /******************************************************************************
@@ -2467,7 +3056,7 @@ static inline void set_on_first_rx_packet(struct perftest_parameters *user_param
 		else
 			catch_alarm(0);
 
-	} else if (user_param->tst == BW){
+	} else if (user_param->tst == BW) {
 		user_param->tposted[0] = get_cycles();
 	}
 }
@@ -2477,17 +3066,20 @@ static inline void set_on_first_rx_packet(struct perftest_parameters *user_param
  ******************************************************************************/
 int run_iter_bw_server(struct pingpong_context *ctx, struct perftest_parameters *user_param)
 {
-	uint64_t			rcnt = 0;
-	int 				ne,i;
-	uint64_t			tot_iters;
+	uint64_t		rcnt = 0;
+	int 			ne,i;
+	uint64_t		tot_iters;
 	uint64_t                *rcnt_for_qp = NULL;
 	struct ibv_wc 		*wc          = NULL;
-	struct ibv_recv_wr  *bad_wr_recv = NULL;
-	struct ibv_wc *swc = NULL;
-	long *scredit_for_qp = NULL;
-	int tot_scredit = 0;
-	int firstRx = 1;
-	int size_per_qp = (user_param->use_srq) ? user_param->rx_depth/user_param->num_of_qps : user_param->rx_depth;
+	struct ibv_recv_wr  	*bad_wr_recv = NULL;
+	struct ibv_wc 		*swc = NULL;
+	long 			*scredit_for_qp = NULL;
+	int 			tot_scredit = 0;
+	int 			firstRx = 1;
+	int 			size_per_qp = (user_param->use_srq) ?
+					user_param->rx_depth/user_param->num_of_qps : user_param->rx_depth;
+	int 			return_value = 0;
+	int			wc_id;
 
 	ALLOCATE(wc ,struct ibv_wc ,CTX_POLL_BATCH);
 	ALLOCATE(swc ,struct ibv_wc ,user_param->tx_depth);
@@ -2499,24 +3091,42 @@ int run_iter_bw_server(struct pingpong_context *ctx, struct perftest_parameters 
 	memset(scredit_for_qp,0,sizeof(long)*user_param->num_of_qps);
 
 	if (user_param->use_rss)
-		tot_iters = user_param->iters*(user_param->num_of_qps-1);
+		tot_iters = (uint64_t)user_param->iters*(user_param->num_of_qps-1);
 	else
-		tot_iters = user_param->iters*user_param->num_of_qps;
+		tot_iters = (uint64_t)user_param->iters*user_param->num_of_qps;
+
+	if (user_param->test_type == ITERATIONS) {
+		check_alive_data.is_events = user_param->use_event;
+		signal(SIGALRM, check_alive);
+		alarm(60);
+	}
+
+	check_alive_data.g_total_iters = tot_iters;
 
 	while (rcnt < tot_iters || (user_param->test_type == DURATION && user_param->state != END_STATE)) {
 
 		if (user_param->use_event) {
 			if (ctx_notify_events(ctx->channel)) {
 				fprintf(stderr ," Failed to notify events to CQ");
-				return 1;
+				return_value = 1;
+				goto cleaning;
 			}
 		}
 
 		do {
-			if (user_param->connection_type == DC)
-				ne = ibv_poll_cq(ctx->send_cq,CTX_POLL_BATCH,wc);
-			else
-				ne = ibv_poll_cq(ctx->recv_cq,CTX_POLL_BATCH,wc);
+			#ifdef HAVE_ACCL_VERBS
+			if (user_param->verb_type == ACCL_INTF)
+				ne = ctx->recv_cq_family->poll_cnt(ctx->recv_cq, CTX_POLL_BATCH);
+			else {
+			#endif
+				if (user_param->connection_type == DC)
+					ne = ibv_poll_cq(ctx->send_cq,CTX_POLL_BATCH,wc);
+				else
+					ne = ibv_poll_cq(ctx->recv_cq,CTX_POLL_BATCH,wc);
+			#ifdef HAVE_ACCL_VERBS
+			}
+			#endif
+
 			if (ne > 0) {
 				if (firstRx) {
 					set_on_first_rx_packet(user_param);
@@ -2524,75 +3134,101 @@ int run_iter_bw_server(struct pingpong_context *ctx, struct perftest_parameters 
 				}
 
 				for (i = 0; i < ne; i++) {
+					wc_id = (user_param->verb_type == ACCL_INTF) ?
+						0 : (int)wc[i].wr_id;
 
-					if (wc[i].status != IBV_WC_SUCCESS) {
+					if (user_param->verb_type != ACCL_INTF) {
+						if (wc[i].status != IBV_WC_SUCCESS) {
 
-						NOTIFY_COMP_ERROR_RECV(wc[i],rcnt_for_qp[0]);
+							NOTIFY_COMP_ERROR_RECV(wc[i],rcnt_for_qp[wc_id]);
+							return_value = 1;
+							goto cleaning;
+						}
 					}
 
-					rcnt_for_qp[wc[i].wr_id]++;
+					rcnt_for_qp[wc_id]++;
 					rcnt++;
+					check_alive_data.current_totrcnt = rcnt;
 
-					if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE)
-						user_param->iters++;
-
-					if (user_param->test_type==DURATION || rcnt_for_qp[wc[i].wr_id] + size_per_qp <= user_param->iters) {
-
-						if (user_param->use_srq) {
-							if (ibv_post_srq_recv(ctx->srq, &ctx->rwr[wc[i].wr_id],&bad_wr_recv)) {
-								fprintf(stderr, "Couldn't post recv SRQ. QP = %d: counter=%lu\n",(int)wc[i].wr_id,rcnt);
-								return 1;
-							}
-
-						} else {
-							if (ibv_post_recv(ctx->qp[wc[i].wr_id],&ctx->rwr[wc[i].wr_id],&bad_wr_recv)) {
-								fprintf(stderr, "Couldn't post recv Qp=%d rcnt=%ld\n",(int)wc[i].wr_id,rcnt_for_qp[wc[i].wr_id]);
-								return 15;
-							}
-
+					if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE) {
+						if (user_param->report_per_port) {
+							user_param->iters_per_port[user_param->port_by_qp[wc_id]]++;
 						}
+						user_param->iters++;
+					}
 
-						if (SIZE(user_param->connection_type,user_param->size,!(int)user_param->machine) <= (cycle_buffer / 2)) {
-							increase_loc_addr(ctx->rwr[wc[i].wr_id].sg_list,
-											  user_param->size,
-											  rcnt_for_qp[wc[i].wr_id] + size_per_qp,
-											  ctx->rx_buffer_addr[wc[i].wr_id],
-											  user_param->connection_type);
+					if (user_param->test_type==DURATION || rcnt_for_qp[wc_id] + size_per_qp <= user_param->iters) {
+						#ifdef HAVE_ACCL_VERBS
+						if (user_param->verb_type == ACCL_INTF) {
+							if (ctx->qp_burst_family[wc_id]->recv_burst(ctx->qp[wc_id], ctx->rwr[wc_id].sg_list, 1)) {
+								fprintf(stderr, "Couldn't post recv burst (accelerated verbs).\n");
+								return_value = 1;
+								goto cleaning;
+							}
+						} else {
+						#endif
+							if (user_param->use_srq) {
+								if (ibv_post_srq_recv(ctx->srq, &ctx->rwr[wc_id],&bad_wr_recv)) {
+									fprintf(stderr, "Couldn't post recv SRQ. QP = %d: counter=%lu\n", wc_id,rcnt);
+									return_value = 1;
+									goto cleaning;
+								}
+
+							} else {
+								if (ibv_post_recv(ctx->qp[wc_id],&ctx->rwr[wc_id],&bad_wr_recv)) {
+									fprintf(stderr, "Couldn't post recv Qp=%d rcnt=%ld\n",wc_id,rcnt_for_qp[wc_id]);
+									return_value = 15;
+									goto cleaning;
+								}
+
+							}
+						#ifdef HAVE_ACCL_VERBS
+						}
+						#endif
+						if (SIZE(user_param->connection_type,user_param->size,!(int)user_param->machine) <= (ctx->cycle_buffer / 2)) {
+							increase_loc_addr(ctx->rwr[wc_id].sg_list,
+									user_param->size,
+									rcnt_for_qp[wc_id] + size_per_qp,
+									ctx->rx_buffer_addr[wc_id],
+									user_param->connection_type,ctx->cache_line_size,ctx->cycle_buffer);
 						}
 					}
 
 					if (ctx->send_rcredit) {
-						int credit_cnt = rcnt_for_qp[wc[i].wr_id]%user_param->rx_depth;
+						int credit_cnt = rcnt_for_qp[wc_id]%user_param->rx_depth;
 
 						if (credit_cnt%ctx->credit_cnt == 0) {
 							struct ibv_send_wr *bad_wr = NULL;
 							int sne = 0, j = 0;
-							ctx->ctrl_buf[wc[i].wr_id] = rcnt_for_qp[wc[i].wr_id];
+							ctx->ctrl_buf[wc_id] = rcnt_for_qp[wc_id];
 
-							while (scredit_for_qp[wc[i].wr_id] == user_param->tx_depth) {
+							while (scredit_for_qp[wc_id] == user_param->tx_depth) {
 								sne = ibv_poll_cq(ctx->send_cq,user_param->tx_depth,swc);
 								if (sne > 0) {
 									for (j = 0; j < sne; j++) {
 										if (swc[j].status != IBV_WC_SUCCESS) {
 											fprintf(stderr, "Poll send CQ error status=%u qp %d credit=%lu scredit=%lu\n",
-												swc[j].status,(int)swc[j].wr_id,
-												rcnt_for_qp[swc[j].wr_id],scredit_for_qp[swc[j].wr_id]);
-											return 1;
+													swc[j].status,(int)swc[j].wr_id,
+													rcnt_for_qp[swc[j].wr_id],scredit_for_qp[swc[j].wr_id]);
+											return_value = 1;
+											goto cleaning;
 										}
 										scredit_for_qp[swc[j].wr_id]--;
 										tot_scredit--;
 									}
 								} else if (sne < 0) {
 									fprintf(stderr, "Poll send CQ failed ne=%d\n",sne);
-									return 1;
+									return_value = 1;
+									goto cleaning;
 								}
 							}
-							if (ibv_post_send(ctx->qp[wc[i].wr_id],&ctx->ctrl_wr[wc[i].wr_id],&bad_wr)) {
+							if (ibv_post_send(ctx->qp[wc_id],&ctx->ctrl_wr[wc_id],&bad_wr)) {
 								fprintf(stderr,"Couldn't post send qp %d credit = %lu\n",
-									(int)wc[i].wr_id,rcnt_for_qp[wc[i].wr_id]);
-								return 1;
+										wc_id,rcnt_for_qp[wc_id]);
+								return_value = 1;
+								goto cleaning;
 							}
-							scredit_for_qp[wc[i].wr_id]++;
+							scredit_for_qp[wc_id]++;
 							tot_scredit++;
 						}
 					}
@@ -2602,28 +3238,35 @@ int run_iter_bw_server(struct pingpong_context *ctx, struct perftest_parameters 
 		} while (ne > 0);
 
 		if (ne < 0) {
-			fprintf(stderr, "Poll Recieve CQ failed %d\n", ne);
-			return 1;
+			fprintf(stderr, "Poll Receive CQ failed %d\n", ne);
+			return_value = 1;
+			goto cleaning;
 		}
+		else if (ne == 0) {
+			if (check_alive_data.to_exit) {
+				user_param->check_alive_exited = 1;
+				return_value = 0;
+				goto cleaning;
+			}
+		}
+
 	}
 	if (user_param->test_type == ITERATIONS)
 		user_param->tcompleted[0] = get_cycles();
 
+cleaning:
 	if (ctx->send_rcredit) {
 		if (clean_scq_credit(tot_scredit, ctx, user_param))
-			return 1;
+			return_value = 1;
 	}
-	/*
-	if (user_param->use_rss) {
-		for (i = 1; i < user_param->num_of_qps; i++)
-			fprintf(stderr,"child %d count = %ld\n",i,rcnt_for_qp[i]);
-	}*/
 
+	check_alive_data.last_totrcnt=0;
 	free(wc);
 	free(rcnt_for_qp);
 	free(swc);
 	free(scredit_for_qp);
-	return 0;
+
+	return return_value;
 }
 
 /******************************************************************************
@@ -2631,16 +3274,17 @@ int run_iter_bw_server(struct pingpong_context *ctx, struct perftest_parameters 
  ******************************************************************************/
 int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_parameters *user_param)
 {
-	int i,j = 0;
-	int index = 0,ne;
-	int err = 0;
-#if defined(HAVE_VERBS_EXP)
-	struct ibv_exp_send_wr *bad_exp_wr = NULL;
-#endif
-	uint64_t *scnt_for_qp = NULL;
-	struct ibv_send_wr *bad_wr = NULL;
-	struct ibv_wc *wc = NULL;
-	int num_of_qps = user_param->num_of_qps;
+	int 			i,j = 0;
+	int 			index = 0,ne;
+	int 			err = 0;
+	#ifdef HAVE_VERBS_EXP
+	struct ibv_exp_send_wr 	*bad_exp_wr = NULL;
+	#endif
+	uint64_t		*scnt_for_qp = NULL;
+	struct ibv_send_wr 	*bad_wr = NULL;
+	struct ibv_wc 		*wc = NULL;
+	int 			num_of_qps = user_param->num_of_qps;
+	int 			return_value = 0;
 
 	ALLOCATE(wc ,struct ibv_wc ,CTX_POLL_BATCH);
 	ALLOCATE(scnt_for_qp,uint64_t,user_param->num_of_qps);
@@ -2651,7 +3295,7 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 	alarm(user_param->duration);
 	user_param->iters = 0;
 
-	// Will be 0, in case of Duration (look at force_dependencies or in the exp above)
+	/* Will be 0, in case of Duration (look at force_dependencies or in the exp above) */
 	if (user_param->duplex && (user_param->use_xrc || user_param->connection_type == DC))
 		num_of_qps /= 2;
 
@@ -2667,10 +3311,10 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 
 	user_param->tposted[0] = get_cycles();
 
-	// main loop for posting
+	/* main loop for posting */
 	while (1) {
 
-		// main loop to run over all the qps and post each time n messages
+		/* main loop to run over all the qps and post each time n messages */
 		for (index =0 ; index < num_of_qps ; index++) {
 
 			while (ctx->scnt[index] < user_param->tx_depth) {
@@ -2679,17 +3323,18 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 					if (swindow >= user_param->rx_depth)
 						break;
 				}
-				#if defined(HAVE_VERBS_EXP)
+				#ifdef HAVE_VERBS_EXP
 				if (user_param->use_exp == 1)
 					err = (ctx->exp_post_send_func_pointer)(ctx->qp[index],&ctx->exp_wr[index*user_param->post_list],&bad_exp_wr);
 				else
 					err = (ctx->post_send_func_pointer)(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
-            			#else
-            				err = ibv_post_send(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
-            			#endif
+				#else
+				err = ibv_post_send(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
+				#endif
 				if (err) {
 					fprintf(stderr,"Couldn't post send: %d scnt=%lu \n",index,ctx->scnt[index]);
-					return 1;
+					return_value = 1;
+					goto cleaning;
 				}
 				ctx->scnt[index] += user_param->post_list;
 				scnt_for_qp[index] += user_param->post_list;
@@ -2702,25 +3347,33 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 		if (ne > 0) {
 
 			for (i = 0; i < ne; i++) {
-				if (wc[i].status != IBV_WC_SUCCESS)
+				if (wc[i].status != IBV_WC_SUCCESS) {
 					NOTIFY_COMP_ERROR_SEND(wc[i],ctx->scnt[(int)wc[i].wr_id],ctx->scnt[(int)wc[i].wr_id]);
-
+					return_value = 1;
+					goto cleaning;
+				}
 				ctx->scnt[(int)wc[i].wr_id]--;
 				user_param->iters++;
 			}
 
 		} else if (ne < 0) {
 			fprintf(stderr, "poll CQ failed %d\n",ne);
-			return 1;
+			return_value = 1;
+			goto cleaning;
 		}
 	}
+
+cleaning:
+	free(scnt_for_qp);
+	free(wc);
+	return return_value;
 }
 
 /******************************************************************************
  *
  ******************************************************************************/
-int run_iter_bw_infinitely_server(struct pingpong_context *ctx, struct perftest_parameters *user_param) {
-
+int run_iter_bw_infinitely_server(struct pingpong_context *ctx, struct perftest_parameters *user_param)
+{
 	int 			i,ne;
 	struct ibv_wc 		*wc          = NULL;
 	struct ibv_wc 		*swc         = NULL;
@@ -2728,6 +3381,7 @@ int run_iter_bw_infinitely_server(struct pingpong_context *ctx, struct perftest_
 	uint64_t                *rcnt_for_qp = NULL;
 	uint64_t                *ccnt_for_qp = NULL;
 	int                     *scredit_for_qp = NULL;
+	int 			return_value = 0;
 
 	ALLOCATE(wc ,struct ibv_wc ,CTX_POLL_BATCH);
 	ALLOCATE(swc ,struct ibv_wc ,user_param->tx_depth);
@@ -2751,21 +3405,24 @@ int run_iter_bw_infinitely_server(struct pingpong_context *ctx, struct perftest_
 
 				if (wc[i].status != IBV_WC_SUCCESS) {
 					fprintf(stderr,"A completion with Error in run_infinitely_bw_server function");
-					return 1;
+					return_value = 1;
+					goto cleaning;
 				}
 
 				if (user_param->use_srq) {
 
 					if (ibv_post_srq_recv(ctx->srq, &ctx->rwr[wc[i].wr_id],&bad_wr_recv)) {
 						fprintf(stderr, "Couldn't post recv SRQ. QP = %d:\n",(int)wc[i].wr_id);
-						return 1;
+						return_value = 1;
+						goto cleaning;
 					}
 
 				} else {
 
 					if (ibv_post_recv(ctx->qp[wc[i].wr_id],&ctx->rwr[wc[i].wr_id],&bad_wr_recv)) {
 						fprintf(stderr, "Couldn't post recv Qp=%d\n",(int)wc[i].wr_id);
-						return 15;
+						return_value = 15;
+						goto cleaning;
 					}
 					if (ctx->send_rcredit) {
 						rcnt_for_qp[wc[i].wr_id]++;
@@ -2783,22 +3440,25 @@ int run_iter_bw_infinitely_server(struct pingpong_context *ctx, struct perftest_
 									for (j = 0; j < sne; j++) {
 										if (swc[j].status != IBV_WC_SUCCESS) {
 											fprintf(stderr, "Poll send CQ error status=%u qp %d credit=%lu scredit=%lu\n",
-												swc[j].status,(int)swc[j].wr_id,
-												rcnt_for_qp[swc[j].wr_id],ccnt_for_qp[swc[j].wr_id]);
-											return 1;
+													swc[j].status,(int)swc[j].wr_id,
+													rcnt_for_qp[swc[j].wr_id],ccnt_for_qp[swc[j].wr_id]);
+											return_value = 1;
+											goto cleaning;
 										}
 										ccnt_for_qp[swc[j].wr_id]--;
 									}
 
 								} else if (sne < 0) {
 									fprintf(stderr, "Poll send CQ failed ne=%d\n",sne);
-									return 1;
+									return_value = 1;
+									goto cleaning;
 								}
 							}
 							if (ibv_post_send(ctx->qp[wc[i].wr_id],&ctx->ctrl_wr[wc[i].wr_id],&bad_wr)) {
 								fprintf(stderr,"Couldn't post send qp %d credit=%lu\n",
-											(int)wc[i].wr_id,rcnt_for_qp[wc[i].wr_id]);
-								return 1;
+										(int)wc[i].wr_id,rcnt_for_qp[wc[i].wr_id]);
+								return_value = 1;
+								goto cleaning;
 							}
 							ccnt_for_qp[wc[i].wr_id]++;
 							scredit_for_qp[wc[i].wr_id] = 0;
@@ -2809,47 +3469,53 @@ int run_iter_bw_infinitely_server(struct pingpong_context *ctx, struct perftest_
 
 		} else if (ne < 0) {
 			fprintf(stderr, "Poll Recieve CQ failed %d\n", ne);
-			return 1;
+			return_value = 1;
+			goto cleaning;
 		}
 	}
+
+cleaning:
+	free(wc);
+	free(swc);
+	free(rcnt_for_qp);
+	free(ccnt_for_qp);
+	free(scredit_for_qp);
+	return return_value;
 }
 
 /******************************************************************************
  *
  ******************************************************************************/
 int run_iter_bi(struct pingpong_context *ctx,
-				struct perftest_parameters *user_param)  {
+		struct perftest_parameters *user_param)  {
 
-	uint64_t totscnt    = 0;
-	uint64_t totccnt    = 0;
-	uint64_t totrcnt    = 0;
-	int i,index      = 0;
-	int ne = 0;
-	int err = 0;
-	uint64_t *rcnt_for_qp = NULL;
-	uint64_t tot_iters = 0;
-	uint64_t iters = 0;
-	int tot_scredit = 0;
-	int *scredit_for_qp = NULL;
-	struct ibv_wc *wc = NULL;
-	struct ibv_wc *wc_tx = NULL;
-	struct ibv_recv_wr *bad_wr_recv = NULL;
-#if defined(HAVE_VERBS_EXP)
-	struct ibv_exp_send_wr *bad_exp_wr      = NULL;
-#endif
-	struct ibv_send_wr *bad_wr      = NULL;
-	int num_of_qps = user_param->num_of_qps;
-	// This is to ensure SERVER will not start to send packets before CLIENT start the test.
-	int before_first_rx = ON;
-	int size_per_qp = (user_param->use_srq) ? user_param->rx_depth/user_param->num_of_qps : user_param->rx_depth;
+	uint64_t 		totscnt    = 0;
+	uint64_t 		totccnt    = 0;
+	uint64_t 		totrcnt    = 0;
+	int 			i,index      = 0;
+	int 			ne = 0;
+	int 			err = 0;
+	uint64_t 		*rcnt_for_qp = NULL;
+	uint64_t 		tot_iters = 0;
+	uint64_t 		iters = 0;
+	int 			tot_scredit = 0;
+	int 			*scredit_for_qp = NULL;
+	struct ibv_wc 		*wc = NULL;
+	struct ibv_wc 		*wc_tx = NULL;
+	struct ibv_recv_wr 	*bad_wr_recv = NULL;
+	#ifdef HAVE_VERBS_EXP
+	struct ibv_exp_send_wr 	*bad_exp_wr      = NULL;
+	#endif
+	struct ibv_send_wr 	*bad_wr      = NULL;
+	int 			num_of_qps = user_param->num_of_qps;
+	/* This is to ensure SERVER will not start to send packets before CLIENT start the test. */
+	int 			before_first_rx = ON;
+	int 			size_per_qp = (user_param->use_srq) ? user_param->rx_depth/user_param->num_of_qps : user_param->rx_depth;
+	int 			return_value = 0;
 
 	ALLOCATE(wc_tx,struct ibv_wc,CTX_POLL_BATCH);
 	ALLOCATE(rcnt_for_qp,uint64_t,user_param->num_of_qps);
 	ALLOCATE(scredit_for_qp,int,user_param->num_of_qps);
-
-	/* This is a very important point. Since this function do RX and TX
-	in the same time, we need to give some priority to RX to avoid
-	deadlock in UC/UD test scenarios (Recv WQEs depleted due to fast TX) */
 	ALLOCATE(wc,struct ibv_wc,user_param->rx_depth);
 
 	memset(rcnt_for_qp,0,sizeof(uint64_t)*user_param->num_of_qps);
@@ -2858,6 +3524,9 @@ int run_iter_bi(struct pingpong_context *ctx,
 	if (user_param->noPeak == ON)
 		user_param->tposted[0] = get_cycles();
 
+	/* This is a very important point. Since this function do RX and TX
+	   in the same time, we need to give some priority to RX to avoid
+	   deadlock in UC/UD test scenarios (Recv WQEs depleted due to fast TX) */
 	if (user_param->machine == CLIENT) {
 
 		before_first_rx = OFF;
@@ -2868,36 +3537,39 @@ int run_iter_bi(struct pingpong_context *ctx,
 			signal(SIGALRM, catch_alarm);
 
 			if (user_param->margin > 0 )
-	                        alarm(user_param->margin);
-        	        else
-                	        catch_alarm(0); //move to next state
+				alarm(user_param->margin);
+			else
+				catch_alarm(0); /* move to next state */
 		}
 	}
 
 	if (user_param->test_type == ITERATIONS) {
-                signal(SIGALRM, check_alive);
-                alarm(60);
+		check_alive_data.is_events = user_param->use_event;
+		signal(SIGALRM, check_alive);
+		alarm(60);
 	}
 
 
 	if(user_param->duplex && (user_param->use_xrc || user_param->connection_type == DC))
 		num_of_qps /= 2;
 
-	tot_iters = user_param->iters*num_of_qps;
+	tot_iters = (uint64_t)user_param->iters*num_of_qps;
 	iters=user_param->iters;
 	check_alive_data.g_total_iters = tot_iters;
 
-	while ((user_param->test_type == DURATION && user_param->state != END_STATE) || totccnt < tot_iters || totrcnt < tot_iters ) {
+	while ((user_param->test_type == DURATION && user_param->state != END_STATE) ||
+							totccnt < tot_iters || totrcnt < tot_iters ) {
 
 		for (index=0; index < num_of_qps; index++) {
 			while (before_first_rx == OFF && (ctx->scnt[index] < iters || user_param->test_type == DURATION) &&
-				((ctx->scnt[index] + scredit_for_qp[index] - ctx->ccnt[index]) < user_param->tx_depth)) {
+					((ctx->scnt[index] + scredit_for_qp[index] - ctx->ccnt[index]) < user_param->tx_depth)) {
 				if (ctx->send_rcredit) {
 					uint32_t swindow = ctx->scnt[index] + user_param->post_list - ctx->credit_buf[index];
 					if (swindow >= user_param->rx_depth)
 						break;
 				}
-				if (user_param->post_list == 1 && (ctx->scnt[index] % user_param->cq_mod == 0 && user_param->cq_mod > 1)) {
+				if (user_param->post_list == 1 && (ctx->scnt[index] % user_param->cq_mod == 0 && user_param->cq_mod > 1)
+					&& !(ctx->scnt[index] == (user_param->iters - 1) && user_param->test_type == ITERATIONS)) {
 					#ifdef HAVE_VERBS_EXP
 					if (user_param->use_exp ==1)
 						ctx->exp_wr[index].exp_send_flags &= ~IBV_EXP_SEND_SIGNALED;
@@ -2911,32 +3583,40 @@ int run_iter_bi(struct pingpong_context *ctx,
 				if (user_param->test_type == DURATION && duration_param->state == END_STATE)
 					break;
 
-				#if defined(HAVE_VERBS_EXP)
+				#ifdef HAVE_VERBS_EXP
 				if (user_param->use_exp == 1)
-		            err = (ctx->exp_post_send_func_pointer)(ctx->qp[index],&ctx->exp_wr[index*user_param->post_list],&bad_exp_wr);
+					err = (ctx->exp_post_send_func_pointer)(ctx->qp[index],
+						&ctx->exp_wr[index*user_param->post_list],&bad_exp_wr);
 				else
-					err = (ctx->post_send_func_pointer)(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
-            	#else
-            	err = ibv_post_send(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
-            	#endif
+					err = (ctx->post_send_func_pointer)(ctx->qp[index],
+						&ctx->wr[index*user_param->post_list],&bad_wr);
+				#else
+				err = ibv_post_send(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
+				#endif
 				if (err) {
-            				fprintf(stderr,"Couldn't post send: qp %d scnt=%lu \n",index,ctx->scnt[index]);
-            				return 1;
-        			}
+					fprintf(stderr,"Couldn't post send: qp %d scnt=%lu \n",index,ctx->scnt[index]);
+					return_value = 1;
+					goto cleaning;
+				}
 
-				if (user_param->post_list == 1 && user_param->size <= (cycle_buffer / 2)) {
+				if (user_param->post_list == 1 && user_param->size <= (ctx->cycle_buffer / 2)) {
 					#ifdef HAVE_VERBS_EXP
 					if (user_param->use_exp == 1)
-						increase_loc_addr(ctx->exp_wr[index].sg_list,user_param->size,ctx->scnt[index],ctx->my_addr[index],0);
+						increase_loc_addr(ctx->exp_wr[index].sg_list,user_param->size,ctx->scnt[index],
+								ctx->my_addr[index],0,ctx->cache_line_size,ctx->cycle_buffer);
 					else
 					#endif
-						increase_loc_addr(ctx->wr[index].sg_list,user_param->size,ctx->scnt[index],ctx->my_addr[index],0);
+						increase_loc_addr(ctx->wr[index].sg_list,user_param->size,ctx->scnt[index],
+								ctx->my_addr[index],0,ctx->cache_line_size,ctx->cycle_buffer);
 				}
 
 				ctx->scnt[index] += user_param->post_list;
 				totscnt += user_param->post_list;
 
-				if (user_param->post_list == 1 && (ctx->scnt[index]%user_param->cq_mod == user_param->cq_mod - 1 || (user_param->test_type == ITERATIONS && ctx->scnt[index] == iters-1))) {
+				if (user_param->post_list == 1 &&
+					(ctx->scnt[index]%user_param->cq_mod == user_param->cq_mod - 1 ||
+						(user_param->test_type == ITERATIONS && ctx->scnt[index] == iters-1))) {
+
 					#ifdef HAVE_VERBS_EXP
 					if (user_param->use_exp == 1)
 						ctx->exp_wr[index].exp_send_flags |= IBV_EXP_SEND_SIGNALED;
@@ -2950,9 +3630,11 @@ int run_iter_bi(struct pingpong_context *ctx,
 
 			if (ctx_notify_events(ctx->channel)) {
 				fprintf(stderr,"Failed to notify events to CQ");
-				return 1;
+				return_value = 1;
+				goto cleaning;
 			}
 		}
+
 		ne = ibv_poll_cq(ctx->recv_cq,user_param->rx_depth,wc);
 		if (ne > 0) {
 
@@ -2964,44 +3646,53 @@ int run_iter_bi(struct pingpong_context *ctx,
 					duration_param->state = START_STATE;
 					signal(SIGALRM, catch_alarm);
 					if (user_param->margin > 0 )
-			                        alarm(user_param->margin);
-                			else
-			                        catch_alarm(0); //move to next state
+						alarm(user_param->margin);
+					else
+						catch_alarm(0); /* move to next state */
 				}
 			}
 
 			for (i = 0; i < ne; i++) {
 				if (wc[i].status != IBV_WC_SUCCESS) {
 					NOTIFY_COMP_ERROR_RECV(wc[i],totrcnt);
+					return_value = 1;
+					goto cleaning;
 				}
 
 				rcnt_for_qp[wc[i].wr_id]++;
 				totrcnt++;
 				check_alive_data.current_totrcnt = totrcnt;
 
-				if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE)
+				if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE) {
+					if (user_param->report_per_port) {
+						user_param->iters_per_port[user_param->port_by_qp[(int)wc[i].wr_id]]++;
+					}
 					user_param->iters++;
+				}
 
 				if (user_param->test_type==DURATION || rcnt_for_qp[wc[i].wr_id] + size_per_qp <= user_param->iters) {
 					if (user_param->use_srq) {
 						if (ibv_post_srq_recv(ctx->srq, &ctx->rwr[wc[i].wr_id],&bad_wr_recv)) {
 							fprintf(stderr, "Couldn't post recv SRQ. QP = %d: counter=%d\n",(int)wc[i].wr_id,(int)totrcnt);
-							return 1;
+							return_value = 1;
+							goto cleaning;
 						}
 
 					} else {
 
 						if (ibv_post_recv(ctx->qp[wc[i].wr_id],&ctx->rwr[wc[i].wr_id],&bad_wr_recv)) {
 							fprintf(stderr, "Couldn't post recv Qp=%d rcnt=%lu\n",(int)wc[i].wr_id,rcnt_for_qp[wc[i].wr_id]);
-							return 15;
+							return_value = 15;
+							goto cleaning;
 						}
 					}
 
-					if (SIZE(user_param->connection_type,user_param->size,!(int)user_param->machine) <= (cycle_buffer / 2)) {
+					if (SIZE(user_param->connection_type,user_param->size,!(int)user_param->machine) <= (ctx->cycle_buffer / 2)) {
 						increase_loc_addr(ctx->rwr[wc[i].wr_id].sg_list,
-										  user_param->size,
-										  rcnt_for_qp[wc[i].wr_id] + size_per_qp -1,
-										  ctx->rx_buffer_addr[wc[i].wr_id],user_param->connection_type);
+								user_param->size,
+								rcnt_for_qp[wc[i].wr_id] + size_per_qp -1,
+								ctx->rx_buffer_addr[wc[i].wr_id],user_param->connection_type,
+								ctx->cache_line_size,ctx->cycle_buffer);
 					}
 				}
 				if (ctx->send_rcredit) {
@@ -3018,9 +3709,10 @@ int run_iter_bi(struct pingpong_context *ctx,
 							if (sne > 0) {
 								if (credit_wc.status != IBV_WC_SUCCESS) {
 									fprintf(stderr, "Poll send CQ error status=%u qp %d credit=%lu scredit=%d\n",
-										credit_wc.status,(int)credit_wc.wr_id,
-										rcnt_for_qp[credit_wc.wr_id],scredit_for_qp[credit_wc.wr_id]);
-										return 1;
+											credit_wc.status,(int)credit_wc.wr_id,
+											rcnt_for_qp[credit_wc.wr_id],scredit_for_qp[credit_wc.wr_id]);
+									return_value = 1;
+									goto cleaning;
 								}
 
 								if (credit_wc.opcode == IBV_WC_RDMA_WRITE) {
@@ -3041,12 +3733,14 @@ int run_iter_bi(struct pingpong_context *ctx,
 								}
 							} else if (sne < 0) {
 								fprintf(stderr, "Poll send CQ ne=%d\n",sne);
-								return 1;
+								return_value = 1;
+								goto cleaning;
 							}
 						}
 						if (ibv_post_send(ctx->qp[wc[i].wr_id],&ctx->ctrl_wr[wc[i].wr_id],&bad_wr)) {
 							fprintf(stderr,"Couldn't post send: qp%lu credit=%lu\n",wc[i].wr_id,rcnt_for_qp[wc[i].wr_id]);
-							return 1;
+							return_value = 1;
+							goto cleaning;
 						}
 						scredit_for_qp[wc[i].wr_id]++;
 						tot_scredit++;
@@ -3056,20 +3750,32 @@ int run_iter_bi(struct pingpong_context *ctx,
 
 		} else if (ne < 0) {
 			fprintf(stderr, "poll CQ failed %d\n", ne);
-			return FAILURE;
+			return_value = FAILURE;
+			goto cleaning;
+		}
+		else if (ne == 0) {
+			if (check_alive_data.to_exit) {
+				user_param->check_alive_exited = 1;
+				return_value = 0;
+				goto cleaning;
+			}
 		}
 
 		ne = ibv_poll_cq(ctx->send_cq,CTX_POLL_BATCH,wc_tx);
 
 		if (ne > 0) {
 			for (i = 0; i < ne; i++) {
-				if (wc_tx[i].status != IBV_WC_SUCCESS)
-					 NOTIFY_COMP_ERROR_SEND(wc_tx[i],totscnt,totccnt);
+				if (wc_tx[i].status != IBV_WC_SUCCESS) {
+					NOTIFY_COMP_ERROR_SEND(wc_tx[i],totscnt,totccnt);
+					return_value = 1;
+					goto cleaning;
+				}
 
 				if (wc_tx[i].opcode == IBV_WC_RDMA_WRITE) {
 					if (!ctx->send_rcredit) {
 						fprintf(stderr, "Polled RDMA_WRITE completion without recv credit request\n");
-						return 1;
+						return_value = 1;
+						goto cleaning;
 					}
 					scredit_for_qp[wc_tx[i].wr_id]--;
 					tot_scredit--;
@@ -3084,32 +3790,41 @@ int run_iter_bi(struct pingpong_context *ctx,
 						else
 							user_param->tcompleted[totccnt-1] = get_cycles();
 					}
-					if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE)
+
+					if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE) {
+						if (user_param->report_per_port) {
+							user_param->iters_per_port[user_param->port_by_qp[(int)wc[i].wr_id]] += user_param->cq_mod;
+						}
 						user_param->iters += user_param->cq_mod;
+					}
 				}
 			}
 
 		} else if (ne < 0) {
 			fprintf(stderr, "poll CQ failed %d\n", ne);
-			return FAILURE;
+			return_value = FAILURE;
+			goto cleaning;
 		}
 	}
 
 	if (user_param->noPeak == ON && user_param->test_type == ITERATIONS) {
-			user_param->tcompleted[0] = get_cycles();
+		user_param->tcompleted[0] = get_cycles();
 	}
 
 	if (ctx->send_rcredit) {
-		if (clean_scq_credit(tot_scredit, ctx, user_param))
-			return 1;
+		if (clean_scq_credit(tot_scredit, ctx, user_param)) {
+			return_value = 1;
+			goto cleaning;
+		}
 	}
 
+cleaning:
 	check_alive_data.last_totrcnt=0;
 	free(rcnt_for_qp);
 	free(scredit_for_qp);
 	free(wc);
 	free(wc_tx);
-	return 0;
+	return return_value;
 }
 
 /******************************************************************************
@@ -3121,19 +3836,19 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 	uint64_t                ccnt = 0;
 	uint64_t                rcnt = 0;
 	int                     ne;
-	int						err = 0;
-	int 					poll_buf_offset = 0;
+	int			err = 0;
+	int 			poll_buf_offset = 0;
 	volatile char           *poll_buf = NULL;
 	volatile char           *post_buf = NULL;
-#if defined(HAVE_VERBS_EXP)
-	struct ibv_exp_send_wr      *bad_exp_wr = NULL;
-#endif
+	#ifdef HAVE_VERBS_EXP
+	struct ibv_exp_send_wr  *bad_exp_wr = NULL;
+	#endif
 	struct ibv_send_wr      *bad_wr = NULL;
 	struct ibv_wc           wc;
 
-	int cpu_mhz = get_cpu_mhz(user_param->cpu_freq_f);
-        int total_gap_cycles = user_param->latency_gap * cpu_mhz;
-        cycles_t end_cycle, start_gap=0;
+	int 			cpu_mhz = get_cpu_mhz(user_param->cpu_freq_f);
+	int 			total_gap_cycles = user_param->latency_gap * cpu_mhz;
+	cycles_t 		end_cycle, start_gap=0;
 
 	#ifdef HAVE_VERBS_EXP
 	if (user_param->use_exp == 1) {
@@ -3153,16 +3868,20 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 
 	if((user_param->use_xrc || user_param->connection_type == DC))
 		poll_buf_offset = 1;
-	post_buf = (char*)ctx->buf + user_param->size - 1;
-	poll_buf = (char*)ctx->buf + (user_param->num_of_qps + poll_buf_offset)*BUFF_SIZE(ctx->size) + user_param->size - 1;
 
-	// Duration support in latency tests.
+	post_buf = (char*)ctx->buf[0] + user_param->size - 1;
+	poll_buf = (char*)ctx->buf[0] + (user_param->num_of_qps + poll_buf_offset)*BUFF_SIZE(ctx->size, ctx->cycle_buffer) + user_param->size - 1;
+
+	/* Duration support in latency tests. */
 	if (user_param->test_type == DURATION) {
 		duration_param=user_param;
 		duration_param->state = START_STATE;
 		signal(SIGALRM, catch_alarm);
-		alarm(user_param->margin);
 		user_param->iters = 0;
+		if (user_param->margin > 0)
+			alarm(user_param->margin);
+		else
+			catch_alarm(0);
 	}
 
 	/* Done with setup. Start the test. */
@@ -3188,18 +3907,18 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 				user_param->tposted[scnt] = get_cycles();
 
 			*post_buf = (char)++scnt;
-			#if defined(HAVE_VERBS_EXP)
+			#ifdef HAVE_VERBS_EXP
 			if (user_param->use_exp == 1)
-        		err = (ctx->exp_post_send_func_pointer)(ctx->qp[0],&ctx->exp_wr[0],&bad_exp_wr);
+				err = (ctx->exp_post_send_func_pointer)(ctx->qp[0],&ctx->exp_wr[0],&bad_exp_wr);
 			else
 				err = (ctx->post_send_func_pointer)(ctx->qp[0],&ctx->wr[0],&bad_wr);
-        	#else
-        		err = ibv_post_send(ctx->qp[0],&ctx->wr[0],&bad_wr);
-        	#endif
+			#else
+			err = ibv_post_send(ctx->qp[0],&ctx->wr[0],&bad_wr);
+			#endif
 			if (err) {
-        		fprintf(stderr,"Couldn't post send: scnt=%lu\n",scnt);
-        		return 1;
-    		}
+				fprintf(stderr,"Couldn't post send: scnt=%lu\n",scnt);
+				return 1;
+			}
 		}
 
 		if (user_param->test_type == DURATION && user_param->state == END_STATE)
@@ -3211,8 +3930,10 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
 
 			if(ne > 0) {
 
-				if (wc.status != IBV_WC_SUCCESS)
+				if (wc.status != IBV_WC_SUCCESS) {
 					NOTIFY_COMP_ERROR_SEND(wc,scnt,ccnt);
+					return 1;
+				}
 
 				ccnt++;
 				if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE)
@@ -3232,18 +3953,18 @@ int run_iter_lat_write(struct pingpong_context *ctx,struct perftest_parameters *
  ******************************************************************************/
 int run_iter_lat(struct pingpong_context *ctx,struct perftest_parameters *user_param)
 {
-	uint64_t scnt = 0;
-	int ne;
-	int err = 0;
-#if defined(HAVE_VERBS_EXP)
-	struct ibv_exp_send_wr *bad_exp_wr = NULL;
-#endif
-	struct ibv_send_wr *bad_wr = NULL;
-	struct ibv_wc wc;
+	uint64_t	scnt = 0;
+	int 		ne;
+	int		err = 0;
+	#ifdef HAVE_VERBS_EXP
+	struct 		ibv_exp_send_wr *bad_exp_wr = NULL;
+	#endif
+	struct 		ibv_send_wr *bad_wr = NULL;
+	struct 		ibv_wc wc;
 
-	int cpu_mhz = get_cpu_mhz(user_param->cpu_freq_f);
-	int total_gap_cycles = user_param->latency_gap * cpu_mhz;
-	cycles_t end_cycle, start_gap=0;
+	int 		cpu_mhz = get_cpu_mhz(user_param->cpu_freq_f);
+	int 		total_gap_cycles = user_param->latency_gap * cpu_mhz;
+	cycles_t 	end_cycle, start_gap=0;
 
 	#ifdef HAVE_VERBS_EXP
 	if (user_param->use_exp == 1) {
@@ -3256,14 +3977,17 @@ int run_iter_lat(struct pingpong_context *ctx,struct perftest_parameters *user_p
 	#ifdef HAVE_VERBS_EXP
 	}
 	#endif
-	
-	// Duration support in latency tests.
+
+	/* Duration support in latency tests. */
 	if (user_param->test_type == DURATION) {
 		duration_param=user_param;
 		duration_param->state = START_STATE;
 		signal(SIGALRM, catch_alarm);
-		alarm(user_param->margin);
 		user_param->iters = 0;
+		if (user_param->margin > 0)
+			alarm(user_param->margin);
+		else
+			catch_alarm(0);
 	}
 
 	while (scnt < user_param->iters || (user_param->test_type == DURATION && user_param->state != END_STATE)) {
@@ -3277,17 +4001,17 @@ int run_iter_lat(struct pingpong_context *ctx,struct perftest_parameters *user_p
 		if (user_param->test_type == ITERATIONS)
 			user_param->tposted[scnt++] = get_cycles();
 
-		#if defined(HAVE_VERBS_EXP)
+		#ifdef HAVE_VERBS_EXP
 		if (user_param->use_exp == 1)
-    		err = (ctx->exp_post_send_func_pointer)(ctx->qp[0],&ctx->exp_wr[0],&bad_exp_wr);
+			err = (ctx->exp_post_send_func_pointer)(ctx->qp[0],&ctx->exp_wr[0],&bad_exp_wr);
 		else
 			err = (ctx->post_send_func_pointer)(ctx->qp[0],&ctx->wr[0],&bad_wr);
-    	#else
-    		err = ibv_post_send(ctx->qp[0],&ctx->wr[0],&bad_wr);
-    	#endif
+		#else
+		err = ibv_post_send(ctx->qp[0],&ctx->wr[0],&bad_wr);
+		#endif
 		if (err) {
-    		fprintf(stderr,"Couldn't post send: scnt=%lu\n",scnt);
-    		return 1;
+			fprintf(stderr,"Couldn't post send: scnt=%lu\n",scnt);
+			return 1;
 		}
 
 		if (user_param->test_type == DURATION && user_param->state == END_STATE)
@@ -3304,9 +4028,10 @@ int run_iter_lat(struct pingpong_context *ctx,struct perftest_parameters *user_p
 			ne = ibv_poll_cq(ctx->send_cq, 1, &wc);
 
 			if(ne > 0) {
-				if (wc.status != IBV_WC_SUCCESS)
+				if (wc.status != IBV_WC_SUCCESS) {
 					NOTIFY_COMP_ERROR_SEND(wc,scnt,scnt);
-
+					return 1;
+				}
 				if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE)
 					user_param->iters++;
 
@@ -3317,6 +4042,7 @@ int run_iter_lat(struct pingpong_context *ctx,struct perftest_parameters *user_p
 
 		} while (!user_param->use_event && ne == 0);
 	}
+
 	return 0;
 }
 
@@ -3325,25 +4051,26 @@ int run_iter_lat(struct pingpong_context *ctx,struct perftest_parameters *user_p
  ******************************************************************************/
 int run_iter_lat_send(struct pingpong_context *ctx,struct perftest_parameters *user_param)
 {
-	uint64_t			scnt = 0; //sent packets counter
-	uint64_t			rcnt = 0; //received packets counter
-	int				poll = 0;
-	int				ne;
-	int				err = 0;
-	struct 			ibv_wc	wc;
-	struct 			ibv_recv_wr	*bad_wr_recv;
-#if defined(HAVE_VERBS_EXP)
-	struct 			ibv_exp_send_wr	*bad_exp_wr;
-#endif
-	struct          ibv_send_wr     *bad_wr;
+	uint64_t		scnt = 0; /* sent packets counter */
+	uint64_t		rcnt = 0; /* received packets counter */
+	int			poll = 0;
+	int			ne;
+	int			err = 0;
+	struct ibv_wc		wc;
+	struct ibv_recv_wr	*bad_wr_recv;
+	#ifdef HAVE_VERBS_EXP
+	struct ibv_exp_send_wr	*bad_exp_wr;
+	#endif
+	struct ibv_send_wr	*bad_wr;
 	int  			firstRx = 1;
-	int size_per_qp = (user_param->use_srq) ? user_param->rx_depth/user_param->num_of_qps : user_param->rx_depth;
-	int cpu_mhz = get_cpu_mhz(user_param->cpu_freq_f);
-	int total_gap_cycles = user_param->latency_gap * cpu_mhz;
-	cycles_t end_cycle, start_gap=0;
+	int 			size_per_qp = (user_param->use_srq) ?
+					user_param->rx_depth/user_param->num_of_qps : user_param->rx_depth;
+	int 			cpu_mhz = get_cpu_mhz(user_param->cpu_freq_f);
+	int			total_gap_cycles = user_param->latency_gap * cpu_mhz;
+	cycles_t 		end_cycle, start_gap=0;
 
 	if (user_param->connection_type != RawEth) {
-		#if defined(HAVE_VERBS_EXP)
+		#ifdef HAVE_VERBS_EXP
 		if (user_param->use_exp == 1) {
 			ctx->exp_wr[0].sg_list->length = user_param->size;
 			ctx->exp_wr[0].exp_send_flags = 0;
@@ -3354,11 +4081,11 @@ int run_iter_lat_send(struct pingpong_context *ctx,struct perftest_parameters *u
 		#ifdef HAVE_VERBS_EXP
 		}
 		#endif
-		
+
 	}
 
 	if (user_param->size <= user_param->inline_size) {
-		#if defined(HAVE_VERBS_EXP)
+		#ifdef HAVE_VERBS_EXP
 		if (user_param->use_exp == 1)
 			ctx->exp_wr[0].exp_send_flags |= IBV_EXP_SEND_INLINE;
 		else
@@ -3395,15 +4122,19 @@ int run_iter_lat_send(struct pingpong_context *ctx,struct perftest_parameters *u
 						firstRx = 0;
 					}
 
-					if (wc.status != IBV_WC_SUCCESS)
+					if (wc.status != IBV_WC_SUCCESS) {
 						NOTIFY_COMP_ERROR_RECV(wc,rcnt);
-
+						return 1;
+					}
 					rcnt++;
 
 					if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE)
 						user_param->iters++;
 
-					//if we're in duration mode or there is enough space in the rx_depth, post that you received a packet
+					/*if we're in duration mode or there
+					 * is enough space in the rx_depth,
+					 * post that you received a packet.
+					 */
 					if (user_param->test_type==DURATION || (rcnt + size_per_qp  <= user_param->iters)) {
 
 						if (user_param->use_srq) {
@@ -3421,6 +4152,9 @@ int run_iter_lat_send(struct pingpong_context *ctx,struct perftest_parameters *u
 							}
 						}
 					}
+				} else if (ne < 0) {
+					fprintf(stderr, "poll CQ failed %d\n", ne);
+					return 1;
 				}
 			} while (!user_param->use_event && ne == 0);
 		}
@@ -3442,32 +4176,31 @@ int run_iter_lat_send(struct pingpong_context *ctx,struct perftest_parameters *u
 
 			if (scnt % user_param->cq_mod == 0 || (user_param->test_type == ITERATIONS && scnt == user_param->iters)) {
 				poll = 1;
-			#if defined(HAVE_VERBS_EXP)
-			if (user_param->use_exp == 1)
-				ctx->exp_wr[0].exp_send_flags |= IBV_EXP_SEND_SIGNALED;
-			else
-			#endif
-				ctx->wr[0].send_flags |= IBV_SEND_SIGNALED;
+				#ifdef HAVE_VERBS_EXP
+				if (user_param->use_exp == 1)
+					ctx->exp_wr[0].exp_send_flags |= IBV_EXP_SEND_SIGNALED;
+				else
+				#endif
+					ctx->wr[0].send_flags |= IBV_SEND_SIGNALED;
 			}
 
-			//if we're in duration mode and the time is over, exit from this function
+			/* if we're in duration mode and the time is over, exit from this function */
 			if (user_param->test_type == DURATION && user_param->state == END_STATE)
 				break;
 
-			//send the packet that's in index 0 on the buffer
-			#if defined(HAVE_VERBS_EXP)
+			/* send the packet that's in index 0 on the buffer */
+			#ifdef HAVE_VERBS_EXP
 			if (user_param->use_exp == 1)
-        		err = (ctx->exp_post_send_func_pointer)(ctx->qp[0],&ctx->exp_wr[0],&bad_exp_wr);
+				err = (ctx->exp_post_send_func_pointer)(ctx->qp[0],&ctx->exp_wr[0],&bad_exp_wr);
 			else
 				err = (ctx->post_send_func_pointer)(ctx->qp[0],&ctx->wr[0],&bad_wr);
-        	#else
-        		err = ibv_post_send(ctx->qp[0],&ctx->wr[0],&bad_wr);
-        	#endif
+			#else
+			err = ibv_post_send(ctx->qp[0],&ctx->wr[0],&bad_wr);
+			#endif
 			if (err) {
-        		fprintf(stderr,"Couldn't post send: scnt=%lu \n",scnt);
-        		return 1;
-    		}
-
+				fprintf(stderr,"Couldn't post send: scnt=%lu \n",scnt);
+				return 1;
+			}
 
 			if (poll == 1) {
 
@@ -3481,7 +4214,7 @@ int run_iter_lat_send(struct pingpong_context *ctx,struct perftest_parameters *u
 					}
 				}
 
-				//wait until you get a cq for the last packet
+				/* wait until you get a cq for the last packet */
 				do {
 					s_ne = ibv_poll_cq(ctx->send_cq, 1, &s_wc);
 				} while (!user_param->use_event && s_ne == 0);
@@ -3493,12 +4226,13 @@ int run_iter_lat_send(struct pingpong_context *ctx,struct perftest_parameters *u
 					return FAILURE;
 				}
 
-				if (s_wc.status != IBV_WC_SUCCESS)
+				if (s_wc.status != IBV_WC_SUCCESS) {
 					NOTIFY_COMP_ERROR_SEND(s_wc,scnt,scnt)
-
+						return 1;
+				}
 				poll = 0;
 
-				#if defined(HAVE_VERBS_EXP)
+				#ifdef HAVE_VERBS_EXP
 				if (user_param->use_exp == 1)
 					ctx->exp_wr[0].exp_send_flags &= ~IBV_EXP_SEND_SIGNALED;
 				else
@@ -3514,8 +4248,8 @@ int run_iter_lat_send(struct pingpong_context *ctx,struct perftest_parameters *u
 /******************************************************************************
  *
  ******************************************************************************/
-uint16_t ctx_get_local_lid(struct ibv_context *context,int port) {
-
+uint16_t ctx_get_local_lid(struct ibv_context *context,int port)
+{
 	struct ibv_port_attr attr;
 
 	if (ibv_query_port(context,port,&attr))
@@ -3527,7 +4261,8 @@ uint16_t ctx_get_local_lid(struct ibv_context *context,int port) {
 /******************************************************************************
  *
  ******************************************************************************/
-void catch_alarm(int sig) {
+void catch_alarm(int sig)
+{
 	switch (duration_param->state) {
 		case START_STATE:
 			duration_param->state = SAMPLE_STATE;
@@ -3553,13 +4288,23 @@ void catch_alarm(int sig) {
 	}
 }
 
-void check_alive(int sig) {
+void check_alive(int sig)
+{
 	if (check_alive_data.current_totrcnt > check_alive_data.last_totrcnt) {
 		check_alive_data.last_totrcnt = check_alive_data.current_totrcnt;
 		alarm(60);
 	} else if (check_alive_data.current_totrcnt == check_alive_data.last_totrcnt && check_alive_data.current_totrcnt < check_alive_data.g_total_iters) {
-		fprintf(stderr,"Did not get Message for 120 Seconds, exiting..\nTotal Received=%d , Total Iters Required=%d\n",check_alive_data.current_totrcnt, check_alive_data.g_total_iters);
-		exit(1);
+		fprintf(stderr," Did not get Message for 120 Seconds, exiting..\n Total Received=%d, Total Iters Required=%d\n",check_alive_data.current_totrcnt, check_alive_data.g_total_iters);
+
+		if (check_alive_data.is_events) {
+			/* Can't report BW, as we are stuck in event_loop */
+			fprintf(stderr," Due to this issue, Perftest cannot produce a report when in event mode.\n");
+			exit(0);
+		}
+		else {
+			/* exit nice from run_iter function and report known bw/mr */
+			check_alive_data.to_exit = 1;
+		}
 	} 
 }
 
@@ -3575,6 +4320,27 @@ void catch_alarm_infintely(int sig)
 	duration_param->tposted[0] = get_cycles();
 }
 
+/******************************************************************************
+ *
+ ******************************************************************************/
+#ifdef HAVE_MASKED_ATOMICS
+int check_masked_atomics_support(struct pingpong_context *ctx)
+{
+	struct ibv_exp_device_attr attr;
+        memset(&attr,0,sizeof (struct ibv_exp_device_attr));
+
+	attr.comp_mask = IBV_EXP_DEVICE_ATTR_EXT_ATOMIC_ARGS | IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS;
+	attr.exp_atomic_cap = IBV_EXP_ATOMIC_HCA_REPLY_BE;
+
+	if (ibv_exp_query_device(ctx->context, &attr)) {
+		fprintf(stderr, "ibv_exp_query_device failed\n");
+		return -1;
+	}
+
+	return MASK_IS_SET(IBV_EXP_ATOMIC_HCA_REPLY_BE, attr.exp_atomic_cap) &&
+		MASK_IS_SET(IBV_EXP_DEVICE_EXT_ATOMICS, attr.exp_device_cap_flags);
+}
+#endif
 /******************************************************************************
  * End
  ******************************************************************************/

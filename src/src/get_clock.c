@@ -44,6 +44,7 @@
 
 #include <unistd.h>
 #include <stdio.h>
+#include <string.h>
 #include "get_clock.h"
 
 #ifndef DEBUG
@@ -58,8 +59,8 @@
 #define USECSTART 100
 
 /*
- Use linear regression to calculate cycles per microsecond.
- http://en.wikipedia.org/wiki/Linear_regression#Parameter_estimation
+   Use linear regression to calculate cycles per microsecond.
+http://en.wikipedia.org/wiki/Linear_regression#Parameter_estimation
 */
 static double sample_get_cpu_mhz(void)
 {
@@ -90,7 +91,7 @@ static double sample_get_cpu_mhz(void)
 				return 0;
 			}
 		} while ((tv2.tv_sec - tv1.tv_sec) * 1000000 +
-			(tv2.tv_usec - tv1.tv_usec) < USECSTART + i * USECSTEP);
+				(tv2.tv_usec - tv1.tv_usec) < USECSTART + i * USECSTEP);
 
 		x[i] = (tv2.tv_sec - tv1.tv_sec) * 1000000 +
 			tv2.tv_usec - tv1.tv_usec;
@@ -133,7 +134,7 @@ static double sample_get_cpu_mhz(void)
 }
 
 #ifndef __s390x__
-static double proc_get_cpu_mhz(int no_cpu_freq_fail)
+static double proc_get_cpu_mhz(int no_cpu_freq_warn)
 {
 	FILE* f;
 	char buf[256];
@@ -148,15 +149,31 @@ static double proc_get_cpu_mhz(int no_cpu_freq_fail)
 		double m;
 		int rc;
 
-#if defined (__ia64__)
+		#if defined (__ia64__)
 		/* Use the ITC frequency on IA64 */
 		rc = sscanf(buf, "itc MHz : %lf", &m);
-#elif defined (__PPC__) || defined (__PPC64__)
+		#elif defined (__PPC__) || defined (__PPC64__)
 		/* PPC has a different format as well */
 		rc = sscanf(buf, "clock : %lf", &m);
-#else
+		#elif defined (__sparc__) && defined (__arch64__)
+		/*
+		 * on sparc the /proc/cpuinfo lines that hold
+		 * the cpu freq in HZ are as follow:
+		 * Cpu{cpu-num}ClkTck      : 00000000a9beeee4
+		 */
+		char *s;
+		unsigned val;
+
+		s = strstr(buf, "ClkTck\t: ");
+		if (!s)
+			continue;
+		s += (strlen("ClkTck\t: ") - strlen("0x"));
+		strncpy(s, "0x", strlen("0x"));
+		rc = sscanf(s, "%x", &val);
+		m = val/1000000;
+		#else
 		rc = sscanf(buf, "cpu MHz : %lf", &m);
-#endif
+		#endif
 
 		if (rc != 1)
 			continue;
@@ -168,46 +185,37 @@ static double proc_get_cpu_mhz(int no_cpu_freq_fail)
 		delta = mhz > m ? mhz - m : m - mhz;
 		if ((delta / mhz > 0.02) && (print_flag ==0)) {
 			print_flag = 1;
-			fprintf(stderr, "Conflicting CPU frequency values"
-				" detected: %lf != %lf\n", mhz, m);
-			if (no_cpu_freq_fail) {
-				fprintf(stderr, "Test integrity may be harmed !\n");
-			}else{
-				return 0.0;
+			if (!no_cpu_freq_warn) {
+				fprintf(stderr, "Conflicting CPU frequency values"
+						" detected: %lf != %lf. CPU Frequency is not max.\n", mhz, m);
 			}
 			continue;
 		}
 	}
+
 	fclose(f);
 	return mhz;
 }
 #endif
 
-double get_cpu_mhz(int no_cpu_freq_fail)
+double get_cpu_mhz(int no_cpu_freq_warn)
 {
-#ifdef __s390x__
+	#ifdef __s390x__
 	return sample_get_cpu_mgz();
-#else
+	#else
 	double sample, proc, delta;
 	sample = sample_get_cpu_mhz();
-	proc = proc_get_cpu_mhz(no_cpu_freq_fail);
+	proc = proc_get_cpu_mhz(no_cpu_freq_warn);
 	#ifdef __aarch64__
-	if (proc < 1) //no cpu_freq info in /proc/cpuinfo
-	{
+	if (proc < 1)
 		proc = sample;
-	}
 	#endif
 	if (!proc || !sample)
 		return 0;
 
 	delta = proc > sample ? proc - sample : sample - proc;
 	if (delta / proc > 0.02) {
-		#if !defined (__PPC__) && !defined (__PPC64__)
-			fprintf(stderr, "Warning: measured timestamp frequency "
-					"%g differs from nominal %g MHz\n",
-					sample, proc);
-		#endif
-			return sample;
+		return sample;
 	}
 	return proc;
 #endif

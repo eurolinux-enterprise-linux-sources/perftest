@@ -1,10 +1,11 @@
 Name:		perftest
 Summary:	IB Performance Tests
-Version:	2.2
-Release:	1%{?dist}
+Version:	3.0
+Release:	2.0.16.gb2f2e82%{?dist}
 License:	GPLv2 or BSD
 Group:		Productivity/Networking/Diagnostic
-Source:		http://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-0.19.g1fec59d.tar.gz
+Source:		https://www.openfabrics.org/downloads/perftest/%{name}-%{version}-0.16.gb2f2e82.tar.gz
+Patch0:		perftest-2.0-cflags.patch
 Url:		http://www.openfabrics.org
 BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires:	libibverbs-devel > 1.1.7, librdmacm-devel > 1.0.17
@@ -21,6 +22,9 @@ RDMA networks.
 
 %prep
 %setup -q
+%patch0 -p1
+# Upstream tarball has source files marked executable.
+chmod -x src/*.[ch]
 
 %build
 %configure
@@ -28,9 +32,9 @@ make %{?_smp_mflags} V=1
 
 %install
 rm -rf %{buildroot}
-for file in ib_{atomic,read,send,write}_{lat,bw}; do
-	install -D -m 0755 $file %{buildroot}%{_bindir}/$file
-done
+
+make DESTDIR=%{buildroot} install
+
 # Several programs were obsoleted by the upgrade from 1.3 to 2.0
 # Create symlinks from the old program name to the most appropriate
 # replacement program so, hopefully, scripts and such won't stop
@@ -49,6 +53,15 @@ rm -rf %{buildroot}
 %_bindir/*
 
 %changelog
+* Thu Jan 21 2016 Michal Schmidt <mschmidt@redhat.com> - 3.0-2.0.16.gb2f2e82
+- Respect distro CFLAGS, restore fortification.
+- debuginfo package had executable source files.
+- Related: bz1127235, bz1129312
+
+* Tue Jan 19 2016 Michal Schmidt <mschmidt@redhat.com> - 3.0-1.0.16.gb2f2e82
+- Update to latest upstream release
+- Related: bz1127235, bz1129312
+
 * Wed Jun 18 2014 Doug Ledford <dledford@redhat.com> - 2.2-1
 - Update to latest upstream release
 - Related: bz830099

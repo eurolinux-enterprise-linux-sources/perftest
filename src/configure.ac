@@ -11,7 +11,7 @@
 # $HEADER$
 dnl Process this file with autoconf to produce a configure script.
 
-AC_INIT([perftest],[5.2],[linux-rdma@vger.kernel.org])
+AC_INIT([perftest],[5.5],[linux-rdma@vger.kernel.org])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_AUX_DIR([config])
 AC_CONFIG_MACRO_DIR([m4])
@@ -22,6 +22,7 @@ AC_SUBST(MAJOR_VERSION)
 AC_SUBST(MINOR_VERSION)
 
 AC_ARG_VAR(CUDA_H_PATH, help-string)
+AC_ARG_VAR(RANLIB, ranlib tool)
 
 AC_ARG_ENABLE([verbs_exp],
 [AS_HELP_STRING([--disable-verbs_exp],
@@ -37,12 +38,14 @@ AC_PROG_CXX
 AM_PROG_AS
 AC_PROG_INSTALL
 AC_PROG_LIBTOOL
+AC_PROG_RANLIB
 AC_HEADER_STDC
 AC_CHECK_HEADERS([infiniband/verbs.h],,[AC_MSG_ERROR([ibverbs header files not found])])
 AC_CHECK_LIB([ibverbs], [ibv_get_device_list], [], [AC_MSG_ERROR([libibverbs not found])])
 AC_CHECK_LIB([rdmacm], [rdma_create_event_channel], [], AC_MSG_ERROR([librdmacm-devel not found]))
 AC_CHECK_LIB([ibumad], [umad_init], [LIBUMAD=-libumad], AC_MSG_ERROR([libibumad not found]))
 AC_CHECK_LIB([m], [log], [LIBMATH=-lm], AC_MSG_ERROR([libm not found]))
+
 AC_TRY_LINK([#include <infiniband/verbs.h>],
 	[struct ibv_exp_flow *t = ibv_exp_create_flow(NULL,NULL);],[HAVE_RAW_ETH_EXP=yes], [HAVE_RAW_ETH_EXP=no])
 
@@ -102,6 +105,15 @@ fi
 AC_TRY_LINK([
 #include <infiniband/verbs.h>
 #include <infiniband/verbs_exp.h>],
+        [int x = IBV_EXP_DEVICE_ATTR_EXT_ATOMIC_ARGS;],[HAVE_MASKED_ATOMICS=yes], [HAVE_MASKED_ATOMICS=no])
+AM_CONDITIONAL([HAVE_MASKED_ATOMICS],[test "x$HAVE_MASKED_ATOMICS" = "xyes"])
+if [test $HAVE_MASKED_ATOMICS = yes] && [test $HAVE_VERBS_EXP = yes]; then
+        AC_DEFINE([HAVE_MASKED_ATOMICS], [1], [Have MASKED ATOMICS in verbs_exp header])
+fi
+
+AC_TRY_LINK([
+#include <infiniband/verbs.h>
+#include <infiniband/verbs_exp.h>],
         [int x = IBV_EXP_DEVICE_ATTR_RSS_TBL_SZ;],[HAVE_RSS_EXP=yes], [HAVE_RSS_EXP=no])
 AM_CONDITIONAL([HAVE_RSS_EXP],[test "x$HAVE_RSS_EXP" = "xyes"])
 if [test $HAVE_RSS_EXP = yes] && [test $HAVE_VERBS_EXP = yes]; then
@@ -117,13 +129,31 @@ if [test $HAVE_DC = yes] && [test $HAVE_VERBS_EXP = yes]; then
         AC_DEFINE([HAVE_DC], [1], [Enable DC feature])
 fi
 
+AC_TRY_LINK([
+#include <infiniband/verbs.h>
+#include <infiniband/verbs_exp.h>],
+        [int x = IBV_EXP_INTF_GLOBAL;],[HAVE_ACCL_VERBS=yes], [HAVE_ACCL_VERBS=no])
+AM_CONDITIONAL([HAVE_ACCL_VERBS],[test "x$HAVE_ACCL_VERBS" = "xyes"])
+if [test $HAVE_ACCL_VERBS = yes] && [test $HAVE_VERBS_EXP = yes]; then
+        AC_DEFINE([HAVE_ACCL_VERBS], [1], [Enable Accelerated verbs feature])
+fi
+
+AC_TRY_LINK([
+#include <infiniband/verbs.h>
+#include <infiniband/verbs_exp.h>],
+        [int x = IBV_EXP_ACCESS_ON_DEMAND;],[HAVE_ODP=yes], [HAVE_ODP=no])
+AM_CONDITIONAL([HAVE_ODP],[test "x$HAVE_ODP" = "xyes"])
+if [test $HAVE_ODP = yes] && [test $HAVE_VERBS_EXP = yes]; then
+        AC_DEFINE([HAVE_ODP], [1], [Have ODP support])
+fi
+
 if [test "$CUDA_H_PATH" ]; then
 	AC_DEFINE([HAVE_CUDA], [1], [Enable CUDA feature])
 	AC_DEFINE_UNQUOTED([CUDA_PATH], "$CUDA_H_PATH" , [Enable CUDA feature])
 	LIBS=$LIBS" -lcuda"
 fi
 
-
+CFLAGS="-g -Wall -D_GNU_SOURCE -O3"
 AC_SUBST([LIBUMAD])
 AC_SUBST([LIBMATH])
 AC_CONFIG_FILES([Makefile])

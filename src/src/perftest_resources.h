@@ -51,7 +51,6 @@
 #ifndef PERFTEST_RESOURCES_H
 #define PERFTEST_RESOURCES_H
 
-// Files included for work.
 #include <infiniband/verbs.h>
 #include <rdma/rdma_cma.h>
 #include <stdint.h>
@@ -63,90 +62,82 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <fcntl.h>
-
 #include "perftest_parameters.h"
 
-#define CACHE_LINE_SIZE     (64)
 #define NUM_OF_RETRIES		(10)
 
+/* Outstanding reads for "read" verb only. */
+#define MAX_SEND_SGE		(1)
+#define MAX_RECV_SGE		(1)
+#define CTX_POLL_BATCH		(16)
+#define PL			(1)
+#define ATOMIC_ADD_VALUE	(1)
+#define ATOMIC_SWAP_VALUE	(0)
 
-// Outstanding reads for "read" verb only.
-#define MAX_SEND_SGE        (1)
-#define MAX_RECV_SGE        (1)
-#define CTX_POLL_BATCH      (16)
-#define PL					(1)
-#define ATOMIC_ADD_VALUE    (1)
-#define ATOMIC_SWAP_VALUE   (0)
-
-// Space for GRH when we scatter the packet in UD.
-#define PINGPONG_SEND_WRID   (60)
-#define PINGPONG_RDMA_WRID	 (3)
-#define PINGPONG_READ_WRID	 (1)
-#define PINGPONG_ATOMIC_WRID (22)
-#define DEFF_QKEY            (0x11111111)
+/* Space for GRH when we scatter the packet in UD. */
+#define PINGPONG_SEND_WRID	(60)
+#define PINGPONG_RDMA_WRID	(3)
+#define PINGPONG_READ_WRID	(1)
+#define PINGPONG_ATOMIC_WRID	(22)
+#define DEFF_QKEY		(0x11111111)
 
 #ifdef HAVE_XRCD
 #define SERVER_FD "/tmp/xrc_domain_server"
 #define CLIENT_FD "/tmp/xrc_domain_client"
 #endif
 
-//global variables
-extern int cycle_buffer;
 
 #define NOTIFY_COMP_ERROR_SEND(wc,scnt,ccnt)                     											\
 	{ fprintf(stderr," Completion with error at client\n");      											\
 	  fprintf(stderr," Failed status %d: wr_id %d syndrom 0x%x\n",wc.status,(int) wc.wr_id,wc.vendor_err);	\
-	  fprintf(stderr, "scnt=%lu, ccnt=%lu\n",scnt, ccnt);	return 1;}
+	  fprintf(stderr, "scnt=%lu, ccnt=%lu\n",scnt, ccnt); }
 
 #define NOTIFY_COMP_ERROR_RECV(wc,rcnt)                     											    \
 	{ fprintf(stderr," Completion with error at server\n");      											\
 	  fprintf(stderr," Failed status %d: wr_id %d syndrom 0x%x\n",wc.status,(int) wc.wr_id,wc.vendor_err);	\
-	  fprintf(stderr," rcnt=%lu\n",rcnt); return 1;}
+	  fprintf(stderr," rcnt=%lu\n",rcnt); }
 
-// Macro to determine packet size in case of UD.
-// The UD addition is for the GRH .
+/* Macro to determine packet size in case of UD. The UD addition is for the GRH . */
 #define SIZE(type,size,valid) ((type == UD && valid) ? (size + UD_ADDITION) : (size))
 
-// Macro to define the buffer size (according to "Nahalem" chip set).
-// for small message size (under 4K) , we allocate 4K buffer , and the RDMA write
-// verb will write in cycle on the buffer. this improves the BW in "Nahalem" systems.
-#define BUFF_SIZE(size) ((size < cycle_buffer) ? (cycle_buffer) : (size))
+/* Macro to define the buffer size (according to "Nahalem" chip set).
+ * for small message size (under 4K) , we allocate 4K buffer , and the RDMA write
+ * verb will write in cycle on the buffer. this improves the BW in "Nahalem" systems.
+ */
+#define BUFF_SIZE(size,cycle_buffer) ((size < cycle_buffer) ? (cycle_buffer) : (size))
 
-// UD addition to the buffer.
-#define IF_UD_ADD(type) ((type == UD) ? (CACHE_LINE_SIZE) : (0))
+/* UD addition to the buffer. */
+#define IF_UD_ADD(type,cache_line_size) ((type == UD) ? (cache_line_size) : (0))
 
-// Macro that defines the adress where we write in RDMA.
-// If message size is smaller then CACHE_LINE size then we write in CACHE_LINE jumps.
-#define INC(size) ((size > CACHE_LINE_SIZE) ? ((size%CACHE_LINE_SIZE == 0) ?  \
-	       (size) : (CACHE_LINE_SIZE*(size/CACHE_LINE_SIZE+1))) : (CACHE_LINE_SIZE))
+/* Macro that defines the adress where we write in RDMA.
+ * If message size is smaller then CACHE_LINE size then we write in CACHE_LINE jumps.
+ */
+#define INC(size,cache_line_size) ((size > cache_line_size) ? ((size%cache_line_size == 0) ?  \
+	       (size) : (cache_line_size*(size/cache_line_size+1))) : (cache_line_size))
 
 #define UD_MSG_2_EXP(size) ((log(size))/(log(2)))
+
+#define MASK_IS_SET(mask, attr)      (((mask)&(attr))!=0)
 
 /******************************************************************************
  * Perftest resources Structures and data types.
  ******************************************************************************/
 struct pingpong_context {
-	struct rdma_event_channel	*cm_channel;
+	struct rdma_event_channel		*cm_channel;
 	struct rdma_cm_id			*cm_id_control;
 	struct rdma_cm_id			*cm_id;
 	struct ibv_context			*context;
-	struct ibv_comp_channel		*channel;
+	struct ibv_comp_channel			*channel;
 	struct ibv_pd				*pd;
-	struct ibv_mr				*mr;
+	struct ibv_mr				**mr;
 	struct ibv_cq				*send_cq;
 	struct ibv_cq				*recv_cq;
-	void						*buf;
+	void					**buf;
 	struct ibv_ah				**ah;
 	struct ibv_qp				**qp;
-#if defined(HAVE_VERBS_EXP)
-	struct ibv_exp_dct			**dct;
-#endif
 	struct ibv_srq				*srq;
 	struct ibv_sge				*sge_list;
 	struct ibv_sge				*recv_sge_list;
-#if defined(HAVE_VERBS_EXP)
-	struct ibv_exp_send_wr			*exp_wr;
-#endif
 	struct ibv_send_wr			*wr;
 	struct ibv_recv_wr			*rwr;
 	uint64_t				size;
@@ -165,15 +156,26 @@ struct pingpong_context {
 	struct ibv_send_wr                      *ctrl_wr;
 	int                                     send_rcredit;
 	int                                     credit_cnt;
-#ifdef HAVE_XRCD
+	int					cache_line_size;
+	int					cycle_buffer;
+	#ifdef HAVE_XRCD
 	struct ibv_xrcd				*xrc_domain;
 	int 					fd;
-#endif
-#if defined(HAVE_VERBS_EXP) 
-        drv_exp_post_send_func exp_post_send_func_pointer;
-        drv_post_send_func post_send_func_pointer;
-	drv_poll_cq_func poll_cq_func_pointer;
-#endif
+	#endif
+	#if defined(HAVE_VERBS_EXP)
+        drv_exp_post_send_func			exp_post_send_func_pointer;
+        drv_post_send_func			post_send_func_pointer;
+	drv_poll_cq_func			poll_cq_func_pointer;
+	struct ibv_exp_dct			**dct;
+	struct ibv_exp_send_wr			*exp_wr;
+	#endif
+	#ifdef HAVE_ACCL_VERBS
+	struct ibv_exp_res_domain		*res_domain;
+	struct ibv_exp_cq_family		*send_cq_family;
+	struct ibv_exp_cq_family		*recv_cq_family;
+	struct ibv_exp_qp_burst_family		**qp_burst_family;
+	#endif
+
 };
 
  struct pingpong_dest {
@@ -182,13 +184,14 @@ struct pingpong_context {
 	int 				qpn;
 	int 				psn;
 	unsigned			rkey;
-	unsigned long long	vaddr;
-	union ibv_gid		gid;
+	unsigned long long		vaddr;
+	union ibv_gid			gid;
 	unsigned			srqn;
+	int				gid_index;
  };
 
 /******************************************************************************
- * Perftest resources Methods and interface utilitizes.f
+ * Perftest resources Methods and interface utilitizes.
  ******************************************************************************/
 
 /* link_layer_str
@@ -591,7 +594,8 @@ uint16_t ctx_get_local_lid(struct ibv_context *context,int ib_port);
  *
  * Return Value : SUCCESS, FAILURE.
  */
-static __inline int ctx_notify_events(struct ibv_comp_channel *channel) {
+static __inline int ctx_notify_events(struct ibv_comp_channel *channel)
+{
 
 	struct ibv_cq       *ev_cq;
 	void                *ev_ctx;
@@ -643,15 +647,15 @@ void gen_udp_header(void* UDP_header_buffer,int* sPort ,int* dPort,uint32_t sadd
  */
 
 #if defined(HAVE_VERBS_EXP)
-static __inline void increase_exp_rem_addr(struct ibv_exp_send_wr *wr,int size,uint64_t scnt,uint64_t prim_addr,VerbType verb) {
-
+static __inline void increase_exp_rem_addr(struct ibv_exp_send_wr *wr,int size,uint64_t scnt,uint64_t prim_addr,VerbType verb, int cache_line_size, int cycle_buffer)
+{
 	if (verb == ATOMIC)
-		wr->wr.atomic.remote_addr += INC(size);
+		wr->wr.atomic.remote_addr += INC(size,cache_line_size);
 
 	else
-		wr->wr.rdma.remote_addr += INC(size);
+		wr->wr.rdma.remote_addr += INC(size,cache_line_size);
 
-	if ( ((scnt+1) % (cycle_buffer/ INC(size))) == 0) {
+	if ( ((scnt+1) % (cycle_buffer/ INC(size,cache_line_size))) == 0) {
 
 		if (verb == ATOMIC)
 			wr->wr.atomic.remote_addr = prim_addr;
@@ -661,15 +665,15 @@ static __inline void increase_exp_rem_addr(struct ibv_exp_send_wr *wr,int size,u
 	}
 }
 #endif
-static __inline void increase_rem_addr(struct ibv_send_wr *wr,int size,uint64_t scnt,uint64_t prim_addr,VerbType verb) {
-
+static __inline void increase_rem_addr(struct ibv_send_wr *wr,int size,uint64_t scnt,uint64_t prim_addr,VerbType verb, int cache_line_size, int cycle_buffer)
+{
 	if (verb == ATOMIC)
-		wr->wr.atomic.remote_addr += INC(size);
+		wr->wr.atomic.remote_addr += INC(size,cache_line_size);
 
 	else
-		wr->wr.rdma.remote_addr += INC(size);
+		wr->wr.rdma.remote_addr += INC(size,cache_line_size);
 
-	if ( ((scnt+1) % (cycle_buffer/ INC(size))) == 0) {
+	if ( ((scnt+1) % (cycle_buffer/ INC(size,cache_line_size))) == 0) {
 
 		if (verb == ATOMIC)
 			wr->wr.atomic.remote_addr = prim_addr;
@@ -693,11 +697,11 @@ static __inline void increase_rem_addr(struct ibv_send_wr *wr,int size,uint64_t 
  *		prim_addr - The address of the original buffer.
  *		server_is_ud - Indication to weather we are in UD mode.
  */
-static __inline void increase_loc_addr(struct ibv_sge *sg,int size,uint64_t rcnt,uint64_t prim_addr,int server_is_ud) {
+static __inline void increase_loc_addr(struct ibv_sge *sg,int size,uint64_t rcnt,uint64_t prim_addr,int server_is_ud, int cache_line_size, int cycle_buffer)
+{
+	sg->addr  += INC(size,cache_line_size);
 
-	sg->addr  += INC(size);
-
-	if ( ((rcnt+1) % (cycle_buffer/ INC(size))) == 0 )
+	if ( ((rcnt+1) % (cycle_buffer/ INC(size,cache_line_size))) == 0 )
 		sg->addr = prim_addr;
 
 }
@@ -742,8 +746,69 @@ void catch_alarm_infintely(int sig) ;
 int ctx_modify_dc_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_param);
 
 int perform_warm_up(struct pingpong_context *ctx,struct perftest_parameters *user_param);
-/******************************************************************************
- *
- ******************************************************************************/
 
+#ifdef HAVE_MASKED_ATOMICS
+struct ibv_qp* ctx_atomic_qp_create(struct pingpong_context *ctx,
+					struct perftest_parameters *user_param);
+int check_masked_atomics_support(struct pingpong_context *ctx);
+#endif
+
+#ifdef HAVE_ACCL_VERBS
+struct ibv_exp_res_domain* create_res_domain(struct pingpong_context *ctx,
+						struct perftest_parameters *user_param);
+#endif
+
+int create_reg_qp_main(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int i, int num_of_qps);
+
+#ifdef HAVE_VERBS_EXP
+int create_exp_qp_main(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int i, int num_of_qps);
+#endif
+
+int create_qp_main(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int i, int num_of_qps);
+
+#ifdef HAVE_VERBS_EXP
+struct ibv_qp* ctx_exp_qp_create(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int qp_index);
+#endif
+
+int modify_qp_to_init(struct pingpong_context *ctx,
+                struct perftest_parameters *user_param, int qp_index, int num_of_qps);
+
+
+/* create_single_mr
+ *
+ * Description :
+ *
+ *	Creates a single MR for a specific QP index.
+ *
+ *	Parameters :
+ *      	ctx - Resources sructure.
+ *		user_param - the perftest parameters.
+ *		qp_index  - QP index to register a MR
+ *
+ * Return Value : SUCCESS, FAILURE.
+ *
+ */
+int create_single_mr(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int qp_index);
+
+/* create_mr
+ *
+ * Description :
+ *
+ *	Creates Memory Regions for the test.
+ *	Takes into consideration all user parameters and test type.
+ *
+ *	Parameters :
+ *      	ctx - Resources sructure.
+ *		user_param - the perftest parameters.
+ *
+ * Return Value : SUCCESS, FAILURE.
+ *
+ */
+int create_mr(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param);
 #endif /* PERFTEST_RESOURCES_H */
