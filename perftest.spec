@@ -1,16 +1,18 @@
 Name:		perftest
 Summary:	IB Performance Tests
-Version:	1.3.0
+Version:	2.0
 Release:	2%{?dist}
 License:	GPLv2 or BSD
 Group:		Productivity/Networking/Diagnostic
-Source:		http://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-0.58.g8f82435.tar.gz
+Source:		http://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-0.52.g49ac91c.tar.gz
+Patch0:		perftest-2.0-cflags.patch
 Url:		http://www.openfabrics.org
 BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires:	libibverbs-devel > 1.1.4, librdmacm-devel > 1.0.14
 BuildRequires:	libibumad-devel > 1.3.6
+BuildRequires:	libtool, automake, autoconf
 Obsoletes:	openib-perftest <= 1.2
-ExclusiveArch:	%{ix86} x86_64 ia64 ppc ppc64
+ExcludeArch:	s390 s390x
 
 %description
 Perftest is a collection of simple test programs designed to utilize 
@@ -20,24 +22,26 @@ RDMA networks.
 
 %prep
 %setup -q
+%patch0 -p1 -b .cflags
 
 %build
-export CFLAGS="$RPM_OPT_FLAGS"
-make
-chmod -x runme
+./autogen.sh
+%configure
+make %{?_smp_mflags} V=1
 
 %install
 rm -rf %{buildroot}
-install -D -m 0755 rdma_lat $RPM_BUILD_ROOT%{_bindir}/rdma_lat
-install -D -m 0755 rdma_bw $RPM_BUILD_ROOT%{_bindir}/rdma_bw
-install -D -m 0755 ib_write_lat $RPM_BUILD_ROOT%{_bindir}/ib_write_lat
-install -D -m 0755 ib_write_bw $RPM_BUILD_ROOT%{_bindir}/ib_write_bw
-install -D -m 0755 ib_send_lat $RPM_BUILD_ROOT%{_bindir}/ib_send_lat
-install -D -m 0755 ib_send_bw $RPM_BUILD_ROOT%{_bindir}/ib_send_bw
-install -D -m 0755 ib_read_lat $RPM_BUILD_ROOT%{_bindir}/ib_read_lat
-install -D -m 0755 ib_read_bw $RPM_BUILD_ROOT%{_bindir}/ib_read_bw
-install -D -m 0755 ib_write_bw_postlist $RPM_BUILD_ROOT%{_bindir}/ib_write_bw_postlist
-install -D -m 0755 ib_clock_test $RPM_BUILD_ROOT%{_bindir}/ib_clock_test
+for file in ib_{atomic,read,send,write}_{lat,bw}; do
+	install -D -m 0755 $file %{buildroot}%{_bindir}/$file
+done
+# Several programs were obsoleted by the upgrade from 1.3 to 2.0
+# Create symlinks from the old program name to the most appropriate
+# replacement program so, hopefully, scripts and such won't stop
+# working suddenly.  However, there is no guarantee that changes to
+# allowed options won't trip some scripts up.
+ln -s ib_read_lat %{buildroot}%{_bindir}/rdma_lat
+ln -s ib_read_bw %{buildroot}%{_bindir}/rdma_bw
+ln -s ib_write_bw %{buildroot}%{_bindir}/ib_write_bw_postlist
 
 %clean
 rm -rf %{buildroot}
@@ -48,6 +52,17 @@ rm -rf %{buildroot}
 %_bindir/*
 
 %changelog
+* Tue Sep 03 2013 Doug Ledford <dledford@redhat.com> - 2.0-2
+- Fix rpmdiff detected error.  Upstream overrode our cflags so stack
+  protector got turned off.
+- Related: bz806183
+
+* Thu Aug 01 2013 Doug Ledford <dledford@redhat.com> - 2.0-1
+- Update to latest upstream release
+- We had to drop ib_clock_test program as no equivalent exists
+  in the latest release
+- Resolves: bz806183, bz806185, bz830099
+
 * Tue Jan 31 2012 Doug Ledford <dledford@redhat.com> - 1.3.0-2
 - Update to latest upstream release
 - No longer strip rocee related code out, we can compile with it now

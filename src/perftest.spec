@@ -1,40 +1,28 @@
 Name:           perftest
 Summary:        IB Performance tests
-Version: 1.3.0
-Release: 0.58.g8f82435
+Version: 2.0
+Release: 0.52.g49ac91c
 License:        BSD 3-Clause, GPL v2 or later
 Group:          Productivity/Networking/Diagnostic
-Source: http://www.openfabrics.org/downloads/perftest-1.3.0-0.58.g8f82435.tar.gz
+Source: http://www.openfabrics.org/downloads/perftest-2.0-0.52.g49ac91c.tar.gz
 Url:            http://www.openfabrics.org
 BuildRoot:      %{_tmppath}/%{name}-%{version}-build
-BuildRequires:  libibverbs-devel librdmacm-devel
+BuildRequires:  libibverbs-devel librdmacm-devel libibumad-devel
 
 %description
-gen2 uverbs microbenchmarks
-
-
+gen3 uverbs microbenchmarks
 
 %prep
 %setup -q
 
 %build
-export CFLAGS="$RPM_OPT_FLAGS"
+%configure
 %{__make}
 chmod -x runme
 
 %install
-install -D -m 0755 rdma_lat $RPM_BUILD_ROOT%{_bindir}/rdma_lat
-install -D -m 0755 rdma_bw $RPM_BUILD_ROOT%{_bindir}/rdma_bw
-install -D -m 0755 ib_write_lat $RPM_BUILD_ROOT%{_bindir}/ib_write_lat
-install -D -m 0755 ib_write_bw $RPM_BUILD_ROOT%{_bindir}/ib_write_bw
-install -D -m 0755 ib_send_lat $RPM_BUILD_ROOT%{_bindir}/ib_send_lat
-install -D -m 0755 ib_send_bw $RPM_BUILD_ROOT%{_bindir}/ib_send_bw
-install -D -m 0755 ib_read_lat $RPM_BUILD_ROOT%{_bindir}/ib_read_lat
-install -D -m 0755 ib_read_bw $RPM_BUILD_ROOT%{_bindir}/ib_read_bw
-install -D -m 0755 ib_atomic_lat $RPM_BUILD_ROOT%{_bindir}/ib_atomic_lat
-install -D -m 0755 ib_atomic_bw $RPM_BUILD_ROOT%{_bindir}/ib_atomic_bw
-install -D -m 0755 ib_write_bw_postlist $RPM_BUILD_ROOT%{_bindir}/ib_write_bw_postlist
-install -D -m 0755 ib_clock_test $RPM_BUILD_ROOT%{_bindir}/ib_clock_test
+rm -rf $RPM_BUILD_ROOT
+make DESTDIR=%{buildroot} install
 
 %clean
 rm -rf ${RPM_BUILD_ROOT}
@@ -45,6 +33,20 @@ rm -rf ${RPM_BUILD_ROOT}
 %_bindir/*
 
 %changelog
+* Wed Jan 09 2013 - idos@mellanox.com
+- Use autotools for building package.
+* Sun Dec 30 2012 - idos@mellanox.com
+- Added raw_ethernet_bw to install script.
+* Sat Oct 21 2012 - idos@mellanox.com
+- Removed write_bw_postlist (feature contained in all BW tests)
+* Sat Oct 20 2012 - idos@mellanox.com
+- Version 2.0 is underway
+* Sun May 14 2012 - idos@mellanox.com
+- Removed (deprecated) rdma_bw and rdma_lat tests
+* Sun Feb 02 2012 - idos@mellanox.com
+- Updated to 1.4.0 version (no compability with older version).
+* Sun Feb 02 2012 - idos@mellanox.com
+- Merge perftest code for Linux & Windows
 * Mon Jan 01 2012 - idos@mellanox.com
 - Added atomic benchmarks
 * Sat Apr 18 2009 - hal.rosenstock@gmail.com
