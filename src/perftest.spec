@@ -1,10 +1,10 @@
 Name:           perftest
 Summary:        IB Performance tests
 Version: 1.3.0
-Release: 0.47.ga001d5f
+Release: 0.58.g8f82435
 License:        BSD 3-Clause, GPL v2 or later
 Group:          Productivity/Networking/Diagnostic
-Source: http://www.openfabrics.org/downloads/perftest-1.3.0-0.47.ga001d5f.tar.gz
+Source: http://www.openfabrics.org/downloads/perftest-1.3.0-0.58.g8f82435.tar.gz
 Url:            http://www.openfabrics.org
 BuildRoot:      %{_tmppath}/%{name}-%{version}-build
 BuildRequires:  libibverbs-devel librdmacm-devel
@@ -31,6 +31,8 @@ install -D -m 0755 ib_send_lat $RPM_BUILD_ROOT%{_bindir}/ib_send_lat
 install -D -m 0755 ib_send_bw $RPM_BUILD_ROOT%{_bindir}/ib_send_bw
 install -D -m 0755 ib_read_lat $RPM_BUILD_ROOT%{_bindir}/ib_read_lat
 install -D -m 0755 ib_read_bw $RPM_BUILD_ROOT%{_bindir}/ib_read_bw
+install -D -m 0755 ib_atomic_lat $RPM_BUILD_ROOT%{_bindir}/ib_atomic_lat
+install -D -m 0755 ib_atomic_bw $RPM_BUILD_ROOT%{_bindir}/ib_atomic_bw
 install -D -m 0755 ib_write_bw_postlist $RPM_BUILD_ROOT%{_bindir}/ib_write_bw_postlist
 install -D -m 0755 ib_clock_test $RPM_BUILD_ROOT%{_bindir}/ib_clock_test
 
@@ -43,6 +45,8 @@ rm -rf ${RPM_BUILD_ROOT}
 %_bindir/*
 
 %changelog
+* Mon Jan 01 2012 - idos@mellanox.com
+- Added atomic benchmarks
 * Sat Apr 18 2009 - hal.rosenstock@gmail.com
 - Change executable names for rdma_lat and rdma_bw
 * Mon Jul 09 2007 - hvogel@suse.de

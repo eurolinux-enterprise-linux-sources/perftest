@@ -1,11 +1,10 @@
 Name:		perftest
-Summary:	IB Performance tests
+Summary:	IB Performance Tests
 Version:	1.3.0
-Release:	1%{?dist}
+Release:	2%{?dist}
 License:	GPLv2 or BSD
 Group:		Productivity/Networking/Diagnostic
-Source:		http://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-0.47.ga001d5f.tar.gz
-Patch0:		perftest-1.3.0-strip-rocee.patch
+Source:		http://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-0.58.g8f82435.tar.gz
 Url:		http://www.openfabrics.org
 BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires:	libibverbs-devel > 1.1.4, librdmacm-devel > 1.0.14
@@ -14,11 +13,13 @@ Obsoletes:	openib-perftest <= 1.2
 ExclusiveArch:	%{ix86} x86_64 ia64 ppc ppc64
 
 %description
-gen2 uverbs microbenchmarks
+Perftest is a collection of simple test programs designed to utilize 
+RDMA communications and provide performance numbers over those RDMA
+connections.  It does not work on normal TCP/IP networks, only on
+RDMA networks.
 
 %prep
 %setup -q
-%patch0 -p1 -b .rocee
 
 %build
 export CFLAGS="$RPM_OPT_FLAGS"
@@ -47,6 +48,11 @@ rm -rf %{buildroot}
 %_bindir/*
 
 %changelog
+* Tue Jan 31 2012 Doug Ledford <dledford@redhat.com> - 1.3.0-2
+- Update to latest upstream release
+- No longer strip rocee related code out, we can compile with it now
+- Related: bz739138
+
 * Fri Jul 22 2011 Doug Ledford <dledford@redhat.com> - 1.3.0-1
 - Update to latest upstream release (1.2.3 -> 1.3.0)
 - Strip rocee related code out of upstream update

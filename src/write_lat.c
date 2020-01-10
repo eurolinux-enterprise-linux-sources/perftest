@@ -44,154 +44,14 @@
 #include <unistd.h>
 #include <string.h>
 #include <malloc.h>
-#include <getopt.h>
-#include <time.h>
-#include <infiniband/verbs.h>
 
 #include "get_clock.h"
 #include "perftest_resources.h"
+#include "perftest_parameters.h"
+#include "perftest_communication.h"
 
-#define VERSION 2.1
-
-static int page_size;
-cycles_t                *tstamp;
-
-struct pingpong_context {
-	struct ibv_context *context;
-	struct ibv_pd      *pd;
-	struct ibv_mr      *mr;
-	struct ibv_cq      *cq;
-	struct ibv_qp      *qp;
-	void               *buf;
-	int                size;
-	int                tx_depth;
-	
-};
-
-/****************************************************************************** 
- *
- ******************************************************************************/
-static int set_up_connection(struct pingpong_context *ctx,
-							 struct perftest_parameters *user_parm,
-							 struct pingpong_dest *my_dest) {
-
-	int use_i = user_parm->gid_index;
-	int port  = user_parm->ib_port;
-
-	if (use_i != -1) {
-		if (ibv_query_gid(ctx->context,port,use_i,&my_dest->gid)) {
-			return -1;
-		}
-	}
-	my_dest->lid   = ctx_get_local_lid(ctx->context,user_parm->ib_port);
-	my_dest->qpn   = ctx->qp->qp_num;
-	my_dest->psn   = lrand48() & 0xffffff;
-	my_dest->rkey  = ctx->mr->rkey;
-	my_dest->vaddr = (uintptr_t)ctx->buf + BUFF_SIZE(ctx->size);
-
-	// We do not fail test upon lid in RDMAoE/Eth conf.
-	if (use_i < 0) {
-		if (!my_dest->lid) {
-			fprintf(stderr," Local lid 0x0 detected. Is an SM running? \n");
-			fprintf(stderr," If you're running RMDAoE you must use GIDs\n");
-			return -1;
-		}
-	}
-	return 0;
-}
-
-/****************************************************************************** 
- *
- ******************************************************************************/
-static int init_connection(struct perftest_parameters *params,
-						   struct pingpong_dest *my_dest) {
-
-	params->side      = LOCAL;
-	ctx_print_pingpong_data(my_dest,params);
-
-	if (params->servername) 
-		params->sockfd = ctx_client_connect(params->servername,params->port);
-	else 
-		params->sockfd = ctx_server_connect(params->port);
-
-	if(params->sockfd < 0) {
-		fprintf(stderr,"Unable to open file descriptor for socket connection");
-		return 1;
-	}
-	return 0;
-}
-
-/****************************************************************************** 
- *
- ******************************************************************************/
-static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
-											struct perftest_parameters *user_parm) {
-	struct pingpong_context *ctx;
-
-	ALLOCATE(ctx,struct pingpong_context,1);
-
-	ctx->size     = user_parm->size;
-	ctx->tx_depth = user_parm->tx_depth;
-
-	ctx->buf = memalign(page_size,BUFF_SIZE(user_parm->size)*2);
-	if (!ctx->buf) {
-		fprintf(stderr, "Couldn't allocate work buf.\n");
-		return NULL;
-	}
-
-	memset(ctx->buf, 0, BUFF_SIZE(user_parm->size)*2);
-
-	ctx->context = ibv_open_device(ib_dev);
-	if (!ctx->context) {
-		fprintf(stderr, "Couldn't get context for %s\n",
-			ibv_get_device_name(ib_dev));
-		return NULL;
-	}
-
-	// Finds the link type and configure the HCA accordingly.
-	if (ctx_set_link_layer(ctx->context,user_parm)) {
-		fprintf(stderr, " Couldn't set the link layer\n");
-		return NULL;
-	}
-
-	// Configure the Link MTU acoording to the user or the active mtu.
-	if (ctx_set_mtu(ctx->context,user_parm)) {
-		fprintf(stderr, "Couldn't set the link layer\n");
-		return NULL;
-	}
-
-	ctx->pd = ibv_alloc_pd(ctx->context);
-	if (!ctx->pd) {
-		fprintf(stderr, "Couldn't allocate PD\n");
-		return NULL;
-	}
-
-	ctx->mr = ibv_reg_mr(ctx->pd, ctx->buf,BUFF_SIZE(user_parm->size) * 2,
-						 IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE);
-	if (!ctx->mr) {
-		fprintf(stderr, "Couldn't allocate MR\n");
-		return NULL;
-	}
-
-	// Creates the CQ according to ctx_cq_create in perfetst_resources.
-	ctx->cq = ctx_cq_create(ctx->context,NULL,user_parm);
-	if (!ctx->cq) {
-		fprintf(stderr, "Couldn't create CQ\n");
-		return NULL;
-	}
-
-	ctx->qp = ctx_qp_create(ctx->pd,ctx->cq,ctx->cq,user_parm);
-	if (!ctx->qp)  {
-		fprintf(stderr, "Couldn't create QP\n");
-		return NULL;
-	}
-
-	if (ctx_modify_qp_to_init(ctx->qp,user_parm)) {
-		fprintf(stderr, "Failed to modify QP to INIT\n");
-		return NULL;
-	}
-	return ctx;
-}
+#define VERSION 2.4
+cycles_t *tstamp;
 
 /****************************************************************************** 
  *
@@ -228,7 +88,7 @@ static int pp_connect_ctx(struct pingpong_context *ctx,int my_psn,
 	attr.ah_attr.port_num       = user_parm->ib_port;
 
 	if (user_parm->connection_type == RC) {
-		if (ibv_modify_qp(ctx->qp, &attr,
+		if (ibv_modify_qp(ctx->qp[0], &attr,
 				  IBV_QP_STATE              |
 				  IBV_QP_AV                 |
 				  IBV_QP_PATH_MTU           |
@@ -243,7 +103,7 @@ static int pp_connect_ctx(struct pingpong_context *ctx,int my_psn,
 		attr.retry_cnt          = 7;
 		attr.rnr_retry          = 7;
 	} else {
-		if (ibv_modify_qp(ctx->qp, &attr,
+		if (ibv_modify_qp(ctx->qp[0], &attr,
 				  IBV_QP_STATE              |
 				  IBV_QP_AV                 |
 				  IBV_QP_PATH_MTU           |
@@ -259,7 +119,7 @@ static int pp_connect_ctx(struct pingpong_context *ctx,int my_psn,
 
 	if (user_parm->connection_type == RC) {
 		attr.max_rd_atomic  = 1;
-		if (ibv_modify_qp(ctx->qp, &attr,
+		if (ibv_modify_qp(ctx->qp[0], &attr,
 				  IBV_QP_STATE              |
 				  IBV_QP_SQ_PSN             |
 				  IBV_QP_TIMEOUT            |
@@ -270,7 +130,7 @@ static int pp_connect_ctx(struct pingpong_context *ctx,int my_psn,
 			return 1;
 		}
 	} else {
-		if (ibv_modify_qp(ctx->qp, &attr,
+		if (ibv_modify_qp(ctx->qp[0], &attr,
 				  IBV_QP_STATE              |
 				  IBV_QP_SQ_PSN)) {
 			fprintf(stderr, "Failed to modify UC QP to RTS\n");
@@ -376,7 +236,7 @@ int run_iter(struct pingpong_context *ctx,
 	struct ibv_send_wr 		*bad_wr = NULL;
 	struct ibv_wc 			wc;
 	          
-	list.addr   = (uintptr_t)ctx->buf ;
+	list.addr   = (uintptr_t)ctx->buf;
 	list.length = user_param->size;
 	list.lkey   = ctx->mr->lkey;
 
@@ -407,7 +267,7 @@ int run_iter(struct pingpong_context *ctx,
 
 			tstamp[scnt] = get_cycles();
 			*post_buf = (char)++scnt;
-			if (ibv_post_send(ctx->qp,&wr,&bad_wr)) {
+			if (ibv_post_send(ctx->qp[0],&wr,&bad_wr)) {
 				fprintf(stderr, "Couldn't post send: scnt=%d\n",scnt);
 				return 11;
 			}
@@ -417,7 +277,7 @@ int run_iter(struct pingpong_context *ctx,
 		if (ccnt < user_param->iters) {	
 		
 			do {
-				ne = ibv_poll_cq(ctx->cq, 1, &wc);
+				ne = ibv_poll_cq(ctx->send_cq, 1, &wc);
 			} while (ne == 0);
 
 			if(ne > 0) {
@@ -442,13 +302,16 @@ int main(int argc, char *argv[]) {
 
 	int                         i = 0;
 	struct report_options       report = {};
-	struct pingpong_context     *ctx;
+	struct pingpong_context     ctx;
 	struct pingpong_dest        my_dest,rem_dest;
 	struct ibv_device           *ib_dev;
 	struct perftest_parameters  user_param;
+	struct perftest_comm		user_comm;
 
 	/* init default values to user's parameters */
+	memset(&ctx,0,sizeof(struct pingpong_context));
 	memset(&user_param, 0, sizeof(struct perftest_parameters));
+	memset(&user_comm,0,sizeof(struct perftest_comm));
 	memset(&my_dest,0,sizeof(struct pingpong_dest));
 	memset(&rem_dest,0,sizeof(struct pingpong_dest));
 
@@ -457,55 +320,106 @@ int main(int argc, char *argv[]) {
 	user_param.r_flag  = &report;
 	user_param.version = VERSION;
 
-	if (parser(&user_param,argv,argc)) 
-		return 1;
-	
-	// Print basic test information.
-	ctx_print_test_info(&user_param);
-	
-	if (user_param.all == ON) {
-		user_param.size = MAX_SIZE; /*2^23 */
+	// Configure the parameters values according to user arguments or defalut values.
+	if (parser(&user_param,argv,argc)) {
+		fprintf(stderr," Parser function exited with Error\n");
+		return FAILURE;
 	}
 
-	srand48(getpid() * time(NULL));
-	page_size = sysconf(_SC_PAGESIZE);
-
+	// Finding the IB device selected (or defalut if no selected).
 	ib_dev = ctx_find_dev(user_param.ib_devname);
-	if (!ib_dev)
-		return 7;
+	if (!ib_dev) {
+		fprintf(stderr," Unable to find the Infiniband/RoCE deivce\n");
+		return FAILURE;
+	}
 
-	ctx = pp_init_ctx(ib_dev,&user_param);
-	if (!ctx)
-		return 8;
+	// Getting the relevant context from the device
+	ctx.context = ibv_open_device(ib_dev);
+	if (!ctx.context) {
+		fprintf(stderr, " Couldn't get context for the device\n");
+		return 1;
+	}
+
+	// See if MTU and link type are valid and supported.
+	if (check_link_and_mtu(ctx.context,&user_param)) {
+		fprintf(stderr, " Couldn't get context for the device\n");
+		return FAILURE;
+	}
+
+	// Print basic test information.
+	ctx_print_test_info(&user_param);
+
+	// copy the rellevant user parameters to the comm struct + creating rdma_cm resources.
+	if (create_comm_struct(&user_comm,&user_param)) { 
+		fprintf(stderr," Unable to create RDMA_CM resources\n");
+		return 1;
+	}
+
+	// Create (if nessacery) the rdma_cm ids and channel.
+	if (user_param.work_rdma_cm == ON) {
+
+		if (create_rdma_resources(&ctx,&user_param)) {
+			fprintf(stderr," Unable to create the rdma_resources\n");
+			return FAILURE;
+	    }
+
+		 if (user_param.machine == CLIENT) {
+
+			if (rdma_client_connect(&ctx,&user_param)) {
+				fprintf(stderr,"Unable to perform rdma_client function\n");
+				return FAILURE;
+			}
+		
+		} else {
+
+			if (rdma_server_connect(&ctx,&user_param)) {
+				fprintf(stderr,"Unable to perform rdma_client function\n");
+				return FAILURE;
+			}
+		}
+
+	} else {
+
+		// create all the basic IB resources (data buffer, PD, MR, CQ and events channel)
+	    if (ctx_init(&ctx,&user_param)) {
+			fprintf(stderr, " Couldn't create IB resources\n");
+			return FAILURE;
+	    }
+	}
 
 	// Set up the Connection.
-	if (set_up_connection(ctx,&user_param,&my_dest)) {
+	if (set_up_connection(&ctx,&user_param,&my_dest)) {
 		fprintf(stderr," Unable to set up socket connection\n");
 		return 1;
-	}	
+	} 
+
+	ctx_print_pingpong_data(&my_dest,&user_comm);
 
 	// Init the connection and print the local data.
-	if (init_connection(&user_param,&my_dest)) {
+	if (establish_connection(&user_comm)) {
 		fprintf(stderr," Unable to init the socket connection\n");
 		return 1;
 	}
-	
-	// shaking hands and gather the other side info.
-    if (ctx_hand_shake(&user_param,&my_dest,&rem_dest)) {
-        fprintf(stderr,"Failed to exchange date between server and clients\n");
-        return 1;
-        
-    }
-	user_param.side = REMOTE;
-	ctx_print_pingpong_data(&rem_dest,&user_param);
 
-	if (pp_connect_ctx(ctx,my_dest.psn,&rem_dest,&user_param)) {
-		fprintf(stderr," Unable to Connect the HCA's through the link\n");
+	// shaking hands and gather the other side info.
+	if (ctx_hand_shake(&user_comm,&my_dest,&rem_dest)) {
+		fprintf(stderr,"Failed to exchange date between server and clients\n");
 		return 1;
 	}
 
+	user_comm.rdma_params->side = REMOTE;
+	ctx_print_pingpong_data(&rem_dest,&user_comm);
+
+	if (user_param.work_rdma_cm == OFF) {
+
+		if (pp_connect_ctx(&ctx,my_dest.psn,&rem_dest,&user_param)) {
+			fprintf(stderr," Unable to Connect the HCA's through the link\n");
+			return 1;
+		}
+	}
+
 	// An additional handshake is required after moving qp to RTR.
-	if (ctx_hand_shake(&user_param,&my_dest,&rem_dest)) {
+	if (ctx_hand_shake(&user_comm,&my_dest,&rem_dest)) {
         fprintf(stderr,"Failed to exchange date between server and clients\n");
         return 1;
     }
@@ -519,14 +433,14 @@ int main(int argc, char *argv[]) {
 
 		for (i = 1; i < 24 ; ++i) {
 			user_param.size = 1 << i;
-			if(run_iter(ctx,&user_param,&rem_dest))
+			if(run_iter(&ctx,&user_param,&rem_dest))
 				return 17;
 			print_report(&user_param);
 		}
 
 	} else {
 
-		if(run_iter(ctx,&user_param,&rem_dest))
+		if(run_iter(&ctx,&user_param,&rem_dest))
 				return 17;
 			print_report(&user_param);
 	}

@@ -61,6 +61,7 @@
 #define PINGPONG_RDMA_WRID	3
 
 static int sl = 0;
+static int tos = -1;
 static int page_size;
 static pid_t pid;
 
@@ -176,6 +177,14 @@ retry_addr:
 			goto err1;
 		}
 		rdma_ack_cm_event(event);
+
+        if (tos >= 0) {
+			uint8_t _tos = tos;
+			if (rdma_set_option(data->cm_id, RDMA_OPTION_ID,RDMA_OPTION_ID_TOS, &_tos, sizeof _tos)) {
+				fprintf(stderr, "%d:%s: set TOS option failed: %d\n",pid, __func__, event->event);
+				goto err1;
+			}
+		}
 	
 retry_route:
 		if (rdma_resolve_route(data->cm_id, 2000)) {
@@ -365,9 +374,13 @@ static struct pingpong_context *pp_server_connect(struct pp_data *data)
 			fprintf(stderr, "%d:%s: rdma_listen failed\n", pid, __func__);
 			goto err3;
 		}
+
+		printf("asaa2\n");
 	
 		if (rdma_get_cm_event(data->cm_channel, &event)) 
 			goto err3;
+
+		printf("asaa1\n");
 
 		if (event->event != RDMA_CM_EVENT_CONNECT_REQUEST) {
 			fprintf(stderr, "%d:%s: bad event waiting for connect request %d\n", 
@@ -404,6 +417,9 @@ static struct pingpong_context *pp_server_connect(struct pp_data *data)
 		conn_param.initiator_depth = 1;
 		conn_param.private_data = &data->my_dest;
 		conn_param.private_data_len = sizeof(data->my_dest);
+
+		printf("asaa3\n");
+
 		if (rdma_accept(child_cm_id, &conn_param)) {
 			fprintf(stderr, "%d:%s: rdma_accept failed\n", pid, __func__);
 			goto err1;
@@ -876,8 +892,9 @@ static void usage(const char *argv0)
 	printf("  -t, --tx-depth=<dep>   size of tx queue (default 100)\n");
 	printf("  -n, --iters=<iters>    number of exchanges (at least 2, default 1000)\n");
 	printf("  -S, --sl=<sl>          SL (default 0)\n");
+    printf("  -T, --tos=<tos>        Type Of Service (default 0)\n");
 	printf("  -b, --bidirectional    measure bidirectional bandwidth (default unidirectional)\n");
-	printf("  -c, --cma		 use RDMA CM\n");
+	printf("  -c, --cma		 		 use RDMA CM\n");
 }
 
 static void print_report(unsigned int iters, unsigned size, int duplex,
@@ -962,12 +979,13 @@ int main(int argc, char *argv[])
 			{ .name = "iters",          .has_arg = 1, .val = 'n' },
 			{ .name = "tx-depth",       .has_arg = 1, .val = 't' },
 			{ .name = "sl",             .has_arg = 1, .val = 'S' },
+            { .name = "tos",            .has_arg = 1, .val = 'T' },
 			{ .name = "bidirectional",  .has_arg = 0, .val = 'b' },
 			{ .name = "cma", 	    .has_arg = 0, .val = 'c' },
 			{ 0 }
 		};
 
-		c = getopt_long(argc, argv, "p:d:i:s:n:t:S:bc", long_options, NULL);
+		c = getopt_long(argc, argv, "p:d:i:s:n:t:S:T:bc", long_options, NULL);
 		if (c == -1)
 			break;
 
@@ -1012,6 +1030,10 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 
+			break;
+
+        case 'T':
+			tos = strtol(optarg, NULL, 0);
 			break;
 
 		case 'S':
