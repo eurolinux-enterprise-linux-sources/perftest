@@ -74,19 +74,26 @@ static inline cycles_t get_cycles()
 typedef unsigned long long cycles_t;
 static inline cycles_t get_cycles(void)
 {
-       cycles_t        clk;
-       asm volatile("stck %0" : "=Q" (clk) : : "cc");
-       return clk >> 2;
+	cycles_t        clk;
+	asm volatile("stck %0" : "=Q" (clk) : : "cc");
+	return clk >> 2;
+}
+#elif defined(__sparc__) && defined(__arch64__)
+typedef unsigned long long cycles_t;
+cycles_t; static inline cycles_t get_cycles(void) {
+	cycles_t v;
+	asm volatile ("rd %%tick, %0" : "=r" (v) : );
+	return v;
 }
 #elif defined(__aarch64__)
 
 typedef unsigned long cycles_t;
 static inline cycles_t get_cycles()
 {
-        cycles_t cval;
-        asm volatile("isb" : : : "memory");
-        asm volatile("mrs %0, cntvct_el0" : "=r" (cval));
-        return cval;
+	cycles_t cval;
+	asm volatile("isb" : : : "memory");
+	asm volatile("mrs %0, cntvct_el0" : "=r" (cval));
+	return cval;
 }
 
 #else

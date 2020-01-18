@@ -1,18 +1,18 @@
 Name:		perftest
 Summary:	IB Performance Tests
-Version:	2.3
+Version:	2.4
 Release:	1%{?dist}
 License:	GPLv2 or BSD
 Group:		Productivity/Networking/Diagnostic
-Source:		http://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-0.12.gcb5b746.tar.gz
+Source:		https://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-0.8.gd3c2b22.tar.gz
 Patch0:		perftest-2.0-cflags.patch
+Patch1:		perftest-enable-s390x-platform-support.patch
 Url:		http://www.openfabrics.org
 BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires:	libibverbs-devel > 1.1.4, librdmacm-devel > 1.0.14
 BuildRequires:	libibumad-devel > 1.3.6
 BuildRequires:	autoconf, automake, libtool
 Obsoletes:	openib-perftest < 1.3
-ExcludeArch:	s390 s390x
 
 %description
 Perftest is a collection of simple test programs designed to utilize 
@@ -23,6 +23,7 @@ RDMA networks.
 %prep
 %setup -q
 %patch0 -p1 -b .cflags
+%patch1 -p1
 autoreconf --force --install
 
 %build
@@ -41,6 +42,11 @@ done
 %_bindir/*
 
 %changelog
+* Tue Jun 16 2015 Michal Schmidt <mschmidt@redhat.com> - 2.4-1
+- Update to latest upstream release
+- Enable s390x platform
+- Resolves: bz1182177
+
 * Fri Oct 17 2014 Doug Ledford <dledford@redhat.com> - 2.3-1
 - Update to latest upstream release
 - Resolves: bz1061582
