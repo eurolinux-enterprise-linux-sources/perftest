@@ -1,15 +1,14 @@
 Name:		perftest
 Summary:	IB Performance Tests
-Version:	3.0
-%define		tar_release 3.1.gb36a595
-Release:	7%{?dist}
+Version:	3.4
+%define		tar_release 0.9.g98a9a17
+Release:	1%{?dist}
 License:	GPLv2 or BSD
 Group:		Productivity/Networking/Diagnostic
 Source0:	https://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-%{tar_release}.tar.gz
 Source1:	ib_atomic_bw.1
 Patch0:		perftest-3.0-cflags.patch
 Patch1:		perftest-enable-s390x-platform-support.patch
-Patch2:		perftest-3.0-fix-memory-leaks.patch
 Url:		http://www.openfabrics.org
 BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires:	libibverbs-devel > 1.1.4, librdmacm-devel > 1.0.14
@@ -27,7 +26,6 @@ RDMA networks.
 %setup -q
 %patch0 -p1 -b .cflags
 %patch1 -p1
-%patch2 -p1
 autoreconf --force --install
 
 %build
@@ -57,6 +55,10 @@ popd
 %{_mandir}/man1/*
 
 %changelog
+* Mon Apr 03 2017 Jarod Wilson <jarod@redhat.com> - 3.4-1
+- Update to upstream 3.4-0.9.g98a9a17 tarball
+- Resolves: rhbz#1437978
+
 * Thu Aug 18 2016 Jarod Wilson <jarod@redhat.com> - 3.0-7
 - Address a myriad more coverity/clang warnings
 - Add raw_ethernet_* man page symlinks
