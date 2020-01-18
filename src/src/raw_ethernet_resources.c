@@ -52,6 +52,7 @@
 #include "multicast_resources.h"
 #include "perftest_communication.h"
 #include "raw_ethernet_resources.h"
+#include "config.h"
 
 struct perftest_parameters* duration_param;
 
@@ -69,7 +70,8 @@ int check_flow_steering_support(char *dev_name)
 	fp = fopen(file_name, "r");
 	if (fp == NULL)
 		return 0;
-	fgets(line,4,fp);
+	if (fgets(line, 4, fp) == NULL)
+		return 0;
 
 	int val = atoi(line);
 	if (val >= 0) {
@@ -341,8 +343,9 @@ static char *etype_str(uint16_t etype)
 /******************************************************************************
  *
  ******************************************************************************/
-void print_ethernet_header(struct ETH_header* p_ethernet_header)
+void print_ethernet_header(void* in_ethernet_header)
 {
+	struct ETH_header* p_ethernet_header = in_ethernet_header;
 	if (NULL == p_ethernet_header) {
 		fprintf(stderr, "ETH_header pointer is Null\n");
 		return;
@@ -372,6 +375,46 @@ void print_ethernet_header(struct ETH_header* p_ethernet_header)
 	char* eth_type = etype_str((ntohs(p_ethernet_header->eth_type)));
 	printf("%-22s|\n",eth_type);
 	printf("|------------------------------------------------------------|\n\n");
+
+}
+/******************************************************************************
+*
+******************************************************************************/
+void print_ethernet_vlan_header(void* in_ethernet_header)
+{
+	struct ETH_vlan_header* p_ethernet_header = in_ethernet_header;
+        if (NULL == p_ethernet_header) {
+                fprintf(stderr, "ETH_header pointer is Null\n");
+                return;
+        }
+
+        printf("**raw ethernet header****************************************\n\n");
+        printf("----------------------------------------------------------------------------\n");
+        printf("| Dest MAC         | Src MAC          |    vlan tag    |   Packet Type     |\n");
+        printf("|--------------------------------------------------------------------------|\n");
+        printf("|");
+        printf(PERF_MAC_FMT,
+                        p_ethernet_header->dst_mac[0],
+                        p_ethernet_header->dst_mac[1],
+                        p_ethernet_header->dst_mac[2],
+                        p_ethernet_header->dst_mac[3],
+                        p_ethernet_header->dst_mac[4],
+                        p_ethernet_header->dst_mac[5]);
+        printf("|");
+        printf(PERF_MAC_FMT,
+                        p_ethernet_header->src_mac[0],
+                        p_ethernet_header->src_mac[1],
+                        p_ethernet_header->src_mac[2],
+                        p_ethernet_header->src_mac[3],
+                        p_ethernet_header->src_mac[4],
+                        p_ethernet_header->src_mac[5]);
+        printf("|");
+        printf("   0x%08x   ",ntohl(p_ethernet_header->vlan_header));
+
+        printf("|");
+        char* eth_type = (ntohs(p_ethernet_header->eth_type) ==  IP_ETHER_TYPE ? "IP" : "DEFAULT");
+        printf("%-19s|\n",eth_type);
+        printf("|--------------------------------------------------------------------------|\n\n");
 
 }
 /******************************************************************************
@@ -489,7 +532,7 @@ void print_pkt(void* pkt,struct perftest_parameters *user_param)
 		return;
 	}
 
-	print_ethernet_header((struct ETH_header*)pkt);
+	user_param->print_eth_func((struct ETH_header*)pkt);
 	if(user_param->is_client_ip || user_param->is_server_ip) {
 		pkt = (void*)pkt + sizeof(struct ETH_header);
 		if (user_param->raw_ipv6)
@@ -522,13 +565,30 @@ void build_pkt_on_buffer(struct ETH_header* eth_header,
 	void* header_buff = NULL;
 	int have_ip_header = user_param->is_client_ip || user_param->is_server_ip;
 	int is_udp_or_tcp = user_param->is_client_port && user_param->is_server_port;
+	int eth_header_size = sizeof(struct ETH_header);
+	static uint32_t vlan_pcp = 0;
+
+	if(user_param->vlan_pcp==VLAN_PCP_VARIOUS) {
+		vlan_pcp++;
+	} else {
+		vlan_pcp = user_param->vlan_pcp;
+	}
 
 	gen_eth_header(eth_header, my_dest_info->mac, rem_dest_info->mac, eth_type);
+
+	if(user_param->vlan_en) {
+		struct ETH_vlan_header *p_eth_vlan = (struct ETH_vlan_header *)eth_header;
+		p_eth_vlan->eth_type = eth_header->eth_type;
+		p_eth_vlan->vlan_header = htonl(VLAN_TPID << 16 |
+								((vlan_pcp & 0x7) << 13) | VLAN_VID | VLAN_CFI << 12);
+		eth_header_size = sizeof(struct ETH_vlan_header);
+		pkt_size -=4;
+	}
 
 	if(have_ip_header) {
 		int offset = is_udp_or_tcp ? 0 : flows_offset;
 
-		header_buff = (void*)eth_header + sizeof(struct ETH_header);
+		header_buff = (void*)eth_header + eth_header_size;
 		if (user_param->raw_ipv6)
 			gen_ipv6_header(header_buff, my_dest_info->ip6,
 					rem_dest_info->ip6, ip_next_protocol,
@@ -573,13 +633,15 @@ void create_raw_eth_pkt( struct perftest_parameters *user_param,
 {
 	int pkt_offset = 0;
 	int flow_limit = 0;
-	int i, print_flag = 0;
+	int i = 0;
+	int print_flag = (user_param->vlan_pcp==VLAN_PCP_VARIOUS) ? PRINT_ON:PRINT_OFF;
 	struct ETH_header* eth_header;
+	uint16_t vlan_tag_size = user_param->vlan_en ? 4 : 0;
 	uint16_t ip_next_protocol = 0;
 	uint16_t eth_type = user_param->is_ethertype ? user_param->ethertype :
 		(user_param->is_client_ip || user_param->is_server_ip ?
 		 (user_param->raw_ipv6) ? IP6_ETHER_TYPE :
-		 IP_ETHER_TYPE : (ctx->size-RAWETH_ADDITION));
+		 IP_ETHER_TYPE : (ctx->size-RAWETH_ADDITION-vlan_tag_size));
 	if(user_param->is_client_port && user_param->is_server_port)
 		ip_next_protocol = (user_param->tcp ? TCP_PROTOCOL : UDP_PROTOCOL);
 
@@ -752,7 +814,7 @@ static void fill_ip_spec(struct ibv_flow_spec* spec_info,
 }
 #endif
 
-static int set_up_flow_rules(
+int set_up_flow_rules(
 		#ifdef HAVE_RAW_ETH_EXP
 		struct ibv_exp_flow_attr **flow_rules,
 		#else
@@ -760,9 +822,9 @@ static int set_up_flow_rules(
 		#endif
 		struct pingpong_context *ctx,
 		struct perftest_parameters *user_param,
-		int flows_offset)
+		int local_port,
+		int remote_port)
 {
-
 	#ifdef HAVE_RAW_ETH_EXP
 	struct ibv_exp_flow_spec* spec_info;
 	struct ibv_exp_flow_attr* attr_info;
@@ -840,13 +902,11 @@ static int set_up_flow_rules(
 		#endif
 
 		if(user_param->machine == SERVER) {
-
-			spec_info->tcp_udp.val.dst_port = htons(user_param->server_port + flows_offset);
-			spec_info->tcp_udp.val.src_port = htons(user_param->client_port + flows_offset);
-
+			spec_info->tcp_udp.val.dst_port = htons(local_port);
+			spec_info->tcp_udp.val.src_port = htons(remote_port);
 		} else {
-			spec_info->tcp_udp.val.dst_port = htons(user_param->client_port + flows_offset);
-			spec_info->tcp_udp.val.src_port = htons(user_param->server_port + flows_offset);
+			spec_info->tcp_udp.val.src_port = htons(local_port);
+			spec_info->tcp_udp.val.dst_port = htons(remote_port);
 		}
 
 		memset((void*)&spec_info->tcp_udp.mask.dst_port, 0xFF,sizeof(spec_info->ipv4.mask.dst_ip));
@@ -861,6 +921,47 @@ static int set_up_flow_rules(
 }
 
 /******************************************************************************
+ *set_fs_rate_rules - init flow struct for FS rate test
+ ******************************************************************************/
+int set_up_fs_rules(
+		#ifdef HAVE_RAW_ETH_EXP
+		struct ibv_exp_flow_attr **flow_rules,
+		#else
+		struct ibv_flow_attr **flow_rules,
+		#endif
+		struct pingpong_context *ctx,
+		struct perftest_parameters *user_param,
+		uint64_t allocated_flows) {
+
+
+	int				local_port = 0;
+	int				remote_port = 0;
+	int				last_local_index = 0;
+	int 				flow_index = 0;
+	int				qp_index = 0;
+	int				allowed_server_ports = MAX_FS_PORT - user_param->server_port;
+
+	for (qp_index = 0; qp_index < user_param->num_of_qps; qp_index++) {
+		for (flow_index = 0; flow_index < allocated_flows; flow_index++) {
+			if (set_up_flow_rules(&flow_rules[(qp_index * allocated_flows) + flow_index],
+					      ctx, user_param, local_port, remote_port)) {
+				fprintf(stderr, "Unable to set up flow rules\n");
+	                        return FAILURE;
+			}
+			if (flow_index <= allowed_server_ports) {
+				local_port = user_param->local_port + flow_index;
+				remote_port = user_param->remote_port;
+				last_local_index = flow_index;
+			} else {
+				local_port = user_param->local_port;
+				remote_port = user_param->remote_port + flow_index - last_local_index;
+			}
+		}
+	}
+	return SUCCESS;
+}
+
+/******************************************************************************2
  *send_set_up_connection - init raw_ethernet_info and ibv_flow_spec to user args
  ******************************************************************************/
 int send_set_up_connection(
@@ -875,19 +976,12 @@ int send_set_up_connection(
 		struct raw_ethernet_info *rem_dest_info)
 {
 
-	union ibv_gid temp_gid;
 	int flow_index;
-
-	if (user_param->gid_index != -1) {
-		if (ibv_query_gid(ctx->context,user_param->ib_port,user_param->gid_index,&temp_gid)) {
-			DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
-			return FAILURE;
-		}
-	}
 
 	if (user_param->machine == SERVER || user_param->duplex) {
 		for (flow_index = 0; flow_index < user_param->flows; flow_index++)
-			set_up_flow_rules(&flow_rules[flow_index], ctx, user_param, flow_index);
+			set_up_flow_rules(&flow_rules[flow_index], ctx,
+					  user_param, user_param->server_port + flow_index, user_param->client_port + flow_index);
 	}
 
 	if (user_param->machine == CLIENT || user_param->duplex) {

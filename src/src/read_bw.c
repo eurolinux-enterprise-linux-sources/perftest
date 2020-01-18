@@ -87,6 +87,12 @@ int main(int argc, char *argv[])
 		return FAILURE;
 	}
 
+	/* Verify user parameters that require the device context,
+	 * the function will print the relevent error info. */
+	if (verify_params_with_device_context(ctx.context, &user_param)) {
+		return FAILURE;
+	}
+
 	/* See if MTU and link type are valid and supported. */
 	if (check_link(ctx.context,&user_param)) {
 		fprintf(stderr, " Couldn't get context for the device\n");
@@ -346,7 +352,7 @@ int main(int argc, char *argv[])
 		ctx_set_send_wqes(&ctx,&user_param,rem_dest);
 
 		if(run_iter_bw_infinitely(&ctx,&user_param)) {
-			fprintf(stderr," Error occured while running! aborting ...\n");
+			fprintf(stderr," Error occurred while running! aborting ...\n");
 			return FAILURE;
 		}
 	}

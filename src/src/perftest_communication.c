@@ -603,11 +603,11 @@ static int get_best_gid_index (struct pingpong_context *ctx,
 
 			gid_attr.comp_mask = IBV_EXP_QUERY_GID_ATTR_TYPE;
 			if (ibv_exp_query_gid_attr(ctx->context, port, gid_index, &gid_attr))
-				return -1;
+				continue;
 			roce_version = gid_attr.type;
 
 			if (ibv_exp_query_gid_attr(ctx->context, port, i, &gid_attr))
-				return -1;
+				continue;
 			roce_version_rival = gid_attr.type;
 
 			if (check_better_roce_version(roce_version, roce_version_rival) == RIGHT_IS_BETTER)
@@ -677,7 +677,7 @@ static int ethernet_server_connect(struct perftest_comm *comm)
 	hints.ai_socktype = SOCK_STREAM;
 
 	if (check_add_port(&service,comm->rdma_params->port,NULL,&hints,&res)) {
-		fprintf(stderr, "Problem in resolving basic adress and port\n");
+		fprintf(stderr, "Problem in resolving basic address and port\n");
 		return 1;
 	}
 
@@ -871,7 +871,7 @@ int rdma_client_connect(struct pingpong_context *ctx,struct perftest_parameters 
 	hints.ai_socktype = SOCK_STREAM;
 
 	if (check_add_port(&service,user_param->port,user_param->servername,&hints,&res)) {
-		fprintf(stderr, "Problem in resolving basic adress and port\n");
+		fprintf(stderr, "Problem in resolving basic address and port\n");
 		return FAILURE;
 	}
 
@@ -1004,8 +1004,7 @@ int rdma_client_connect(struct pingpong_context *ctx,struct perftest_parameters 
 		user_param->rem_ud_qkey = event->param.ud.qkey;
 
 		ctx->ah[0] = ibv_create_ah(ctx->pd,&event->param.ud.ah_attr);
-
-		if (!ctx->ah) {
+		if (!ctx->ah[0]) {
 			printf(" Unable to create address handler for UD QP\n");
 			return FAILURE;
 		}
@@ -1069,7 +1068,7 @@ int rdma_server_connect(struct pingpong_context *ctx,
 	hints.ai_socktype = SOCK_STREAM;
 
 	if (check_add_port(&service,user_param->port,user_param->servername,&hints,&res)) {
-		fprintf(stderr, "Problem in resolving basic adress and port\n");
+		fprintf(stderr, "Problem in resolving basic address and port\n");
 		return FAILURE;
 	}
 
@@ -1192,6 +1191,7 @@ int create_comm_struct(struct perftest_comm *comm,
 	comm->rdma_params->retry_count		= user_param->retry_count;
 	comm->rdma_params->mr_per_qp		= user_param->mr_per_qp;
 	comm->rdma_params->dlid			= user_param->dlid;
+	comm->rdma_params->cycle_buffer         = user_param->cycle_buffer;
 
 	if (user_param->use_rdma_cm) {
 
@@ -1706,6 +1706,7 @@ int check_mtu(struct ibv_context *context,struct perftest_parameters *user_param
 	char cur[2];
 	char rem[2];
 	int size_of_cur;
+	float rem_vers = atof(user_param->rem_version);
 
 	if (user_param->connection_type == RawEth) {
 		if (set_eth_mtu(user_param) != 0 ) {
@@ -1715,11 +1716,12 @@ int check_mtu(struct ibv_context *context,struct perftest_parameters *user_param
 	} else {
 		curr_mtu = (int) (set_mtu(context,user_param->ib_port,user_param->mtu));
 		if (!user_param->dont_xchg_versions) {
-			if (strverscmp(user_param->rem_version, "5.1") >= 0) {
+			/*add mtu set in remote node from version 5.1 and above*/
+			if (rem_vers >= 5.1 ) {
 				sprintf(cur,"%d",curr_mtu);
 
 				/*fix a buffer overflow issue in ppc.*/
-				size_of_cur = (strverscmp(user_param->rem_version, "5.31") >= 0) ? sizeof(char[2]) : sizeof(int);
+				size_of_cur = (rem_vers >= 5.31) ? sizeof(char[2]) : sizeof(int);
 
 				if (ctx_xchg_data(user_comm,(void*)(cur),(void*)(rem),size_of_cur)) {
 					fprintf(stderr," Failed to exchange data between server and clients\n");

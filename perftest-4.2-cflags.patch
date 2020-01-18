@@ -1,0 +1,13 @@
+Index: perftest-4.2/configure.ac
+===================================================================
+--- perftest-4.2.orig/configure.ac
++++ perftest-4.2/configure.ac
+@@ -310,7 +310,7 @@ if [test $HAVE_EXP_OOO_ATTR = yes]; then
+ 	AC_DEFINE([HAVE_EXP_OOO_ATTR], [1], [Have Experimental Out of order data placement support])
+ fi
+ 
+-CFLAGS="-g -Wall -D_GNU_SOURCE -O3 $CFLAGS"
++CFLAGS+=" -g -Wall -D_GNU_SOURCE -O3 $CFLAGS"
+ LIBS=$LIBS" -lpthread"
+ AC_SUBST([LIBUMAD])
+ AC_SUBST([LIBMATH])

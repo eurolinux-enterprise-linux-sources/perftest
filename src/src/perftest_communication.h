@@ -45,20 +45,18 @@
 #include "perftest_resources.h"
 
 /* Macro for 64 bit variables to switch to/from net */
-#if __BYTE_ORDER == __BIG_ENDIAN || __BYTE_ORDER == __LITTLE_ENDIAN
-#if __BYTE_ORDER == __BIG_ENDIAN
+#if BYTE_ORDER == BIG_ENDIAN
 #define ntoh_64(x) (x)
 #define hton_64(x) (x)
 #define ntoh_double(x) (x)
 #define hton_double(x) (x)
-#else
+#elif BYTE_ORDER == LITTLE_ENDIAN
 #define ntoh_64(x) bswap_64(x)
 #define hton_64(x) bswap_64(x)
 #define ntoh_double(x) bswap_double(x)
 #define hton_double(x) bswap_double(x)
-#endif
 #else
-#error "Only BIG_ENDIAN and LITTLE_ENDIAN are supported."
+#error "Must set BYTE_ORDER"
 #endif
 
 /* long is 64-bit in LP64 mode, 32-bit in LLP64 mode. */
@@ -79,10 +77,10 @@
 #define SYNC_SPEC_ID	 (5)
 
 /* The Format of the message we pass through sockets , without passing Gid. */
-#define KEY_PRINT_FMT "%04x:%04x:%06x:%06x:%08x:%016Lx:%08x"
+#define KEY_PRINT_FMT "%04x:%04x:%06x:%06x:%08x:%016llx:%08x"
 
 /* The Format of the message we pass through sockets (With Gid). */
-#define KEY_PRINT_FMT_GID "%04x:%04x:%06x:%06x:%08x:%016Lx:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%08x:"
+#define KEY_PRINT_FMT_GID "%04x:%04x:%06x:%06x:%08x:%016llx:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%08x:"
 
 /* The Basic print format for all verbs. */
 #define BASIC_ADDR_FMT " %s address: LID %#04x QPN %#06x PSN %#06x"
@@ -91,7 +89,7 @@
 #define READ_FMT       " OUT %#04x"
 
 /* The print format of the pingpong_dest element for RDMA verbs. */
-#define RDMA_FMT       " RKey %#08x VAddr %#016Lx"
+#define RDMA_FMT       " RKey %#08x VAddr %#016llx"
 
 /* The print number of SRQ in case of XRC */
 #define XRC_FMT 	   " SRQn %#08x"

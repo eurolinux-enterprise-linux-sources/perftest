@@ -113,7 +113,7 @@
 /* UD addition to the buffer. */
 #define IF_UD_ADD(type,cache_line_size) ((type == UD) ? (cache_line_size) : (0))
 
-/* Macro that defines the adress where we write in RDMA.
+/* Macro that defines the address where we write in RDMA.
  * If message size is smaller then CACHE_LINE size then we write in CACHE_LINE jumps.
  */
 #define INC(size,cache_line_size) ((size > cache_line_size) ? ((size%cache_line_size == 0) ?  \
@@ -279,6 +279,21 @@ void alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_par
  */
 int destroy_ctx(struct pingpong_context *ctx,
 				struct perftest_parameters *user_param);
+
+/* verify_params_with_device_context
+ *
+ * Description :
+ * 		Verify user params that require information from the ibv_context
+ *
+ * Parameters :
+ *	context - ibv_context
+ * 	user_param - the perftest parameters.
+ *
+ * Return Value : SUCCESS, FAILURE.
+ */
+int verify_params_with_device_context(struct ibv_context *ctx,
+				      struct perftest_parameters *user_param);
+
 
 /* ctx_init
  *
@@ -718,7 +733,15 @@ void check_alive(int sig);
  *  Will be triggered every 5 sec and measure BW in this time frame.
  *
  */
-void catch_alarm_infintely(int sig) ;
+void catch_alarm_infintely();
+
+/* handle_signal_print_thread
+*
+* Description :
+* 	Handle thread creation for signal catching in run_infinitely mode
+*
+*/
+void *handle_signal_print_thread(void *sig_mask);
 
 /* ctx_modify_dc_qp_to_init.
  *
@@ -747,6 +770,9 @@ int check_masked_atomics_support(struct pingpong_context *ctx);
 
 #if defined (HAVE_PACKET_PACING_EXP) || defined (HAVE_PACKET_PACING)
 int check_packet_pacing_support(struct pingpong_context *ctx);
+#if defined (HAVE_PACKET_PACING_EXTENSION_EXP)
+int check_packet_pacing_extension_support(struct pingpong_context *ctx);
+#endif
 #endif
 
 #ifdef HAVE_ACCL_VERBS
@@ -820,6 +846,21 @@ int create_mr(struct pingpong_context *ctx,
  * Return Value : SUCCESS, FAILURE.
  *
  */
-int alloc_hugepage_region (struct pingpong_context *ctx);
+int alloc_hugepage_region (struct pingpong_context *ctx, int qp_index);
+
+/* run_iter_fs_rate
+ *
+ * Description :
+ *
+ *	The main testing method for Flow steering creation
+ *
+ * Parameters :
+ *
+ *	ctx		- Test Context.
+ *	user_param	- user_parameters struct for this test.
+ *
+ */
+
+int run_iter_fs(struct pingpong_context *ctx, struct perftest_parameters *user_param);
 
 #endif /* PERFTEST_RESOURCES_H */

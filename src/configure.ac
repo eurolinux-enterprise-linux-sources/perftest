@@ -1,17 +1,35 @@
+# Copyright (C) 2001-2011 Mellanox Technologies Ltd.  All rights reserved.
 #
-# Copyright (C) Mellanox Technologies Ltd. 2001-2011.  ALL RIGHTS RESERVED.
-# This software product is a proprietary product of Mellanox Technologies Ltd.
-# (the "Company") and all right, title, and interest and to the software product,
-# including all associated intellectual property rights, are and shall
-# remain exclusively with the Company.
+# This software is available to you under a choice of one of two
+# licenses.  You may choose to be licensed under the terms of the GNU
+# General Public License (GPL) Version 2, available from the file
+# COPYING in the main directory of this source tree, or the
+# OpenIB.org BSD license below:
 #
-# This software product is governed by the End User License Agreement
-# provided with the software product.
-# $COPYRIGHT$
-# $HEADER$
+#     Redistribution and use in source and binary forms, with or
+#     without modification, are permitted provided that the following
+#     conditions are met:
+#
+#      - Redistributions of source code must retain the above
+#        copyright notice, this list of conditions and the following
+#        disclaimer.
+#
+#      - Redistributions in binary form must reproduce the above
+#        copyright notice, this list of conditions and the following
+#        disclaimer in the documentation and/or other materials
+#        provided with the distribution.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 dnl Process this file with autoconf to produce a configure script.
 
-AC_INIT([perftest],[5.6],[linux-rdma@vger.kernel.org])
+AC_INIT([perftest],[5.60],[linux-rdma@vger.kernel.org])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_AUX_DIR([config])
 AC_CONFIG_MACRO_DIR([m4])
@@ -227,7 +245,7 @@ AC_TRY_LINK([
 #include <infiniband/verbs_exp.h>],
         [int x = IBV_EXP_ACCESS_ON_DEMAND;],[HAVE_EXP_ODP=yes], [HAVE_EXP_ODP=no])
 AM_CONDITIONAL([HAVE_EXP_ODP],[test "x$HAVE_EXP_ODP" = "xyes"])
-if [test $HAVE_EXP_ODP = yes] ; then
+if [test $HAVE_EXP_ODP = yes] && [test $HAVE_VERBS_EXP = yes]; then
 	if  [test $HAVE_EX_ODP = no] ; then
 		AC_DEFINE([HAVE_EXP_ODP], [1], [Have Experimental ODP support])
 	fi
@@ -257,11 +275,18 @@ if [test $HAVE_GID_ATTR = yes] && [test $HAVE_VERBS_EXP = yes]; then
         AC_DEFINE([HAVE_GID_ATTR], [1], [Enable GID Attribute query feature])
 fi
 
-AC_TRY_LINK([#include <infiniband/verbs.h>],
+AC_TRY_LINK([ #include <infiniband/verbs_exp.h>],
 	[struct ibv_exp_qp_attr *attr; int x = attr->rate_limit;],[HAVE_PACKET_PACING_EXP=yes], [HAVE_PACKET_PACING_EXP=no])
 AM_CONDITIONAL([HAVE_PACKET_PACING_EXP],[test "x$HAVE_PACKET_PACING_EXP" = "xyes"])
 if [test $HAVE_PACKET_PACING_EXP = yes] && [test $HAVE_VERBS_EXP = yes]; then
 	AC_DEFINE([HAVE_PACKET_PACING_EXP], [1], [Have PACKET_PACING_EXP support])
+fi
+
+AC_TRY_LINK([ #include <infiniband/verbs_exp.h>],
+	[struct ibv_exp_qp_attr *attr; struct ibv_exp_burst_info x = attr->burst_info;],[HAVE_PACKET_PACING_EXTENSION_EXP=yes], [HAVE_PACKET_PACING_EXTENSION_EXP=no])
+AM_CONDITIONAL([HAVE_PACKET_PACING_EXTENSION_EXP],[test "x$HAVE_PACKET_PACING_EXTENSION_EXP" = "xyes"])
+if [test $HAVE_PACKET_PACING_EXTENSION_EXP = yes] && [test $HAVE_VERBS_EXP = yes]; then
+	AC_DEFINE([HAVE_PACKET_PACING_EXTENSION_EXP], [1], [Have PACKET_PACING_EXTENSION_EXP support])
 fi
 
 AC_TRY_LINK([#include <infiniband/verbs.h>],
@@ -271,7 +296,22 @@ if [test $HAVE_PACKET_PACING = yes]; then
 	AC_DEFINE([HAVE_PACKET_PACING], [1], [Have PACKET_PACING support])
 fi
 
-CFLAGS="-g -Wall -D_GNU_SOURCE -O3"
+AC_TRY_LINK([#include <infiniband/verbs.h>],
+	[int x = IBV_OOO_RW_DATA_PLACEMENT;], [HAVE_OOO_ATTR=yes], [HAVE_OOO_ATTR=no])
+AM_CONDITIONAL([HAVE_OOO_ATTR], [test "x$HAVE_OOO_ATTR" = "xyes"])
+if [test $HAVE_OOO_ATTR = yes]; then
+	AC_DEFINE([HAVE_OOO_ATTR], [1], [Have Out of order data placement support])
+fi
+
+AC_TRY_LINK([#include <infiniband/verbs_exp.h>],
+	[int x = IBV_EXP_OOO_SUPPORT_RW_DATA_PLACEMENT;], [HAVE_EXP_OOO_ATTR=yes], [HAVE_EXP_OOO_ATTR=no])
+AM_CONDITIONAL([HAVE_EXP_OOO_ATTR], [test "x$HAVE_EXP_OOO_ATTR" = "xyes"])
+if [test $HAVE_EXP_OOO_ATTR = yes]; then
+	AC_DEFINE([HAVE_EXP_OOO_ATTR], [1], [Have Experimental Out of order data placement support])
+fi
+
+CFLAGS="-g -Wall -D_GNU_SOURCE -O3 $CFLAGS"
+LIBS=$LIBS" -lpthread"
 AC_SUBST([LIBUMAD])
 AC_SUBST([LIBMATH])
 AC_CONFIG_FILES([Makefile])

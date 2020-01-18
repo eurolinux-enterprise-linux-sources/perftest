@@ -158,17 +158,22 @@
 #define MAX_CQ_MOD    (1024)
 #define MAX_INLINE    (912)
 #define MAX_INLINE_UD (884)
+#define MIN_EQ_NUM    (0)
+#define MAX_EQ_NUM    (2048)
 
 /* Raw etherent defines */
 #define RAWETH_MIN_MSG_SIZE	(64)
 #define MIN_MTU_RAW_ETERNET	(64)
 #define MAX_MTU_RAW_ETERNET	(9600)
-
+#define MIN_FS_PORT		(5000)
+#define MAX_FS_PORT		(65536)
+#define VLAN_PCP_VARIOUS        (8)
 
 #define RESULT_LINE "---------------------------------------------------------------------------------------\n"
 
 #define RESULT_LINE_PER_PORT "-------------------------------------------------------------------------------------------------------------------------------------------------------------------\n"
-
+#define CYCLES	"cycles"
+#define USEC	"usec"
 /* The format of the results */
 #define RESULT_FMT		" #bytes     #iterations    BW peak[MB/sec]    BW average[MB/sec]   MsgRate[Mpps]"
 
@@ -190,6 +195,10 @@
 
 #define RESULT_EXT_CPU_UTIL "    CPU_Util[%%]\n"
 
+#define RESULT_FMT_FS_RATE " #flows	fs_min_time[usec]	fs_max_time[usec]	fs_typical_time[usec]	fs_avg_time[usec]	fps[flow per sec]"
+
+#define RESULT_FMT_FS_RATE_DUR " #flows		fs_avg_time[usec]    	fps[flow per sec]"
+
 /* Result print format */
 #define REPORT_FMT     " %-7lu    %-10lu       %-7.2lf            %-7.2lf		   %-7.6lf"
 
@@ -204,9 +213,12 @@
 #define REPORT_FMT_QOS " %-7lu    %d           %lu           %-7.2lf            %-7.2lf                  %-7.6lf\n"
 
 /* Result print format for latency tests. */
-#define REPORT_FMT_LAT " %-7lu %d          %-7.2f        %-7.2f      %-7.2f  	       %-7.2f     	%-7.2f        %-7.2f              %-7.2f"
-
+#define REPORT_FMT_LAT " %-7lu %d          %-7.2f        %-7.2f      %-7.2f  	       %-7.2f     	%-7.2f		%-7.2f 		%-7.2f"
 #define REPORT_FMT_LAT_DUR " %-7lu       %d            %-7.2f        %-7.2f"
+
+#define REPORT_FMT_FS_RATE " %d          %-7.2f        		%-7.2f      	%-7.2f  	       		%-7.2f     	%-7.2f"
+
+#define REPORT_FMT_FS_RATE_DUR " %d               %-7.2f		%-7.2f"
 
 #define CHECK_VALUE(arg,type,minv,maxv,name) 						    					\
 { arg = (type)strtol(optarg, NULL, 0); if ((arg < minv) || (arg > maxv))                \
@@ -231,7 +243,7 @@
 typedef enum { SEND , WRITE, READ, ATOMIC } VerbType;
 
 /* The type of the test */
-typedef enum { LAT , BW , LAT_BY_BW } TestType;
+typedef enum { LAT , BW , LAT_BY_BW, FS_RATE } TestType;
 
 /* The type of the machine ( server or client actually). */
 typedef enum { SERVER , CLIENT , UNCHOSEN} MachineType;
@@ -273,7 +285,9 @@ enum ctx_device {
 	QLOGIC_AH		= 13,
 	CHELSIO_T6		= 14,
 	CONNECTX5		= 15,
-	CONNECTX5EX		= 16
+	CONNECTX5EX		= 16,
+	CONNECTX6		= 17,
+	BLUEFIELD		= 18
 };
 
 /* Units for rate limiter */
@@ -304,6 +318,29 @@ struct check_alive_data {
 	int to_exit;
 	int is_events;
 };
+
+/* gen_eth_header .
+ * Description :create raw Ethernet header on buffer
+ *
+ * Parameters :
+ *	 	eth_header - Pointer to output
+ *	 	src_mac - source MAC address of the packet
+ *	 	dst_mac - destination MAC address of the packet
+ *	 	eth_type - IP/or size of ptk
+ *
+ *
+struct ETH_header {
+	uint8_t dst_mac[6];
+	uint8_t src_mac[6];
+	uint16_t eth_type;
+}__attribute__((packed));
+
+struct ETH_vlan_header {
+        uint8_t dst_mac[6];
+        uint8_t src_mac[6];
+        uint32_t vlan_header;
+        uint16_t eth_type;
+}__attribute__((packed));*/
 
 struct perftest_parameters {
 
@@ -356,6 +393,8 @@ struct perftest_parameters {
 	int				connection_type;
 	int				num_of_qps;
 	int				use_event;
+	int				eq_num;
+	int				use_eq_num;
 	int 				inline_size;
 	int				inline_recv_size;
 	int				out_reads;
@@ -419,8 +458,9 @@ struct perftest_parameters {
 	/* Rate Limiter */
 	char				*rate_limit_str;
 	double 				rate_limit;
-	int				valid_hw_rate_limit;
+	int				valid_hw_rate_limit_index;
 	int 				burst_size;
+	int				typical_pkt_size;
 	enum 				rate_limiter_units rate_units;
 	enum 				rate_limiter_types rate_limit_type;
 	int				is_rate_limit_type;
@@ -457,6 +497,11 @@ struct perftest_parameters {
 	int				flows_burst;
 	uint32_t			reply_every;
 	int				perform_warm_up;
+	int				use_ooo;
+	int                             vlan_en;
+	uint32_t			vlan_pcp;
+	void 				(*print_eth_func)(void*);
+
 };
 
 struct report_options {
@@ -636,6 +681,17 @@ void print_report_lat (struct perftest_parameters *user_param);
  *
  */
 void print_report_lat_duration (struct perftest_parameters *user_param);
+
+/* print_report_fs_rate
+ *
+ * Description : Prints the Flow steering rate and avarage latency to create flow
+ *
+ * Parameters :
+ *
+ *   user_param  - the parameters parameters.
+ *
+ */
+void print_report_fs_rate (struct perftest_parameters *user_param);
 
 /* set_mtu
  *

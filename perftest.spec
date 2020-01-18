@@ -1,14 +1,14 @@
 Name:		perftest
 Summary:	IB Performance Tests
-Version:	3.4
-%define		tar_release 0.9.g98a9a17
-Release:	1%{?dist}
+Version:	4.2
+%define		minor_release 0.8
+%define		git_hash g0e24e67
+Release:	2%{?dist}
 License:	GPLv2 or BSD
 Group:		Productivity/Networking/Diagnostic
-Source0:	https://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-%{tar_release}.tar.gz
+Source0:	https://github.com/linux-rdma/perftest/releases/download/V%{version}-%{minor_release}/perftest-%{version}-%{minor_release}.%{git_hash}.tar.gz
 Source1:	ib_atomic_bw.1
-Patch0:		perftest-3.0-cflags.patch
-Patch1:		perftest-enable-s390x-platform-support.patch
+Patch1:		perftest-4.2-cflags.patch
 Url:		http://www.openfabrics.org
 BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires:	libibverbs-devel > 1.1.4, librdmacm-devel > 1.0.14
@@ -24,7 +24,6 @@ RDMA networks.
 
 %prep
 %setup -q
-%patch0 -p1 -b .cflags
 %patch1 -p1
 autoreconf --force --install
 
@@ -55,6 +54,14 @@ popd
 %{_mandir}/man1/*
 
 %changelog
+* Mon Jun 25 2018 Jarod Wilson <jarod@redhat.com> 4.2-2
+- Update to upstream 4.2-0.8.g0e24e67 tarball
+- Related: rhbz#1456523
+
+* Tue May 01 2018 Jarod Wilson <jarod@redhat.com> - 4.2-1
+- Update to upstream 4.2-0.5.gdd28746 tarball
+- Resolves: rhbz#1456523
+
 * Mon Apr 03 2017 Jarod Wilson <jarod@redhat.com> - 3.4-1
 - Update to upstream 3.4-0.9.g98a9a17 tarball
 - Resolves: rhbz#1437978
