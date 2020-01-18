@@ -34,6 +34,12 @@
  * $Id$
  */
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,14 +66,15 @@ int main(int argc, char *argv[])
 	int				ret_parser;
 	struct perftest_parameters	user_param;
 	#ifdef HAVE_RAW_ETH_EXP
-	struct ibv_exp_flow		*flow_create_result = NULL;
-	struct ibv_exp_flow_attr	*flow_rules = NULL;
+	struct ibv_exp_flow		**flow_create_result;
+	struct ibv_exp_flow_attr	**flow_rules;
 	struct ibv_exp_flow 		*flow_promisc = NULL;
 	#else
-	struct ibv_flow		*flow_create_result = NULL;
-	struct ibv_flow_attr	*flow_rules = NULL;
+	struct ibv_flow			**flow_create_result;
+	struct ibv_flow_attr		**flow_rules;
 	#endif
 	struct report_options		report;
+	int				i;
 
 	/* allocate memory space for user parameters &*/
 	memset(&ctx,		0, sizeof(struct pingpong_context));
@@ -84,9 +91,6 @@ int main(int argc, char *argv[])
 	user_param.connection_type = RawEth;
 	user_param.r_flag  = &report;
 
-	if (check_flow_steering_support()) {
-		return 1;
-	}
 
 	/* Configure the parameters values according to user
 	   arguments or default values. */
@@ -99,18 +103,30 @@ int main(int argc, char *argv[])
 		DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
 		return 1;
 	}
+	#ifdef HAVE_RAW_ETH_EXP
+	ALLOCATE(flow_create_result, struct ibv_exp_flow*, user_param.flows);
+	ALLOCATE(flow_rules, struct ibv_exp_flow_attr*, user_param.flows);
+	#else
+	ALLOCATE(flow_create_result, struct ibv_flow*, user_param.flows);
+	ALLOCATE(flow_rules, struct ibv_flow_attr*, user_param.flows);
+	#endif
+
 
 	/*this is a bidirectional test, so we need to let the init functions
 	 * think we are in duplex mode
 	 */
 	user_param.duplex  = 1;
 
-
 	/* Find the selected IB device (or default if the user didn't select one). */
 	ib_dev = ctx_find_dev(user_param.ib_devname);
 	if (!ib_dev) {
 		fprintf(stderr," Unable to find the Infiniband/RoCE device\n");
 		DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
+		return 1;
+	}
+	GET_STRING(user_param.ib_devname, ibv_get_device_name(ib_dev));
+
+	if (check_flow_steering_support(user_param.ib_devname)) {
 		return 1;
 	}
 
@@ -132,18 +148,19 @@ int main(int argc, char *argv[])
 	/* Allocating arrays needed for the test. */
 	alloc_ctx(&ctx, &user_param);
 
-	/* Print basic test information. */
-	ctx_print_test_info(&user_param);
-
 	/*set up the connection, return the required flow rules (notice that user_param->duplex == TRUE)
 	 * so the function will setup like it's a bidirectional test
 	 */
-	if (send_set_up_connection(&flow_rules, &ctx, &user_param, &my_dest_info, &rem_dest_info)) {
+	if (send_set_up_connection(flow_rules, &ctx, &user_param, &my_dest_info, &rem_dest_info)) {
 		fprintf(stderr," Unable to set up socket connection\n");
 		return 1;
 	}
 
-	print_spec(flow_rules,&user_param);
+	/* Print basic test information. */
+	ctx_print_test_info(&user_param);
+
+	for (i = 0; i < user_param.flows; i++)
+		print_spec(flow_rules[i], &user_param);
 
 	/* Create (if necessary) the rdma_cm ids and channel. */
 	if (user_param.work_rdma_cm == ON) {
@@ -178,16 +195,18 @@ int main(int argc, char *argv[])
 
 
 	/* attaching the qp to the spec */
-	#ifdef HAVE_RAW_ETH_EXP
-	flow_create_result = ibv_exp_create_flow(ctx.qp[0], flow_rules);
-	#else
-	flow_create_result = ibv_create_flow(ctx.qp[0], flow_rules);
-	#endif
+	for (i = 0; i < user_param.flows; i++) {
+		#ifdef HAVE_RAW_ETH_EXP
+		flow_create_result[i] = ibv_exp_create_flow(ctx.qp[0], flow_rules[i]);
+		#else
+		flow_create_result[i] = ibv_create_flow(ctx.qp[0], flow_rules[i]);
+		#endif
 
-	if (!flow_create_result){
-		perror("error");
-		fprintf(stderr, "Couldn't attach QP\n");
-		return FAILURE;
+		if (!flow_create_result[i]){
+			perror("error");
+			fprintf(stderr, "Couldn't attach QP\n");
+			return FAILURE;
+		}
 	}
 
 	#ifdef HAVE_RAW_ETH_EXP
@@ -253,19 +272,20 @@ int main(int argc, char *argv[])
 	}
 	#endif
 
-
 	/* destroy flow */
-	#ifdef HAVE_RAW_ETH_EXP
-	if (ibv_exp_destroy_flow(flow_create_result)) {
-	#else
-	if (ibv_destroy_flow(flow_create_result)) {
-	#endif
-		perror("error");
-		fprintf(stderr, "Couldn't Destory flow\n");
-		return FAILURE;
-	}
+	for (i = 0; i < user_param.flows; i++) {
+		#ifdef HAVE_RAW_ETH_EXP
+		if (ibv_exp_destroy_flow(flow_create_result[i])) {
+		#else
+		if (ibv_destroy_flow(flow_create_result[i])) {
+		#endif
+			perror("error");
+			fprintf(stderr, "Couldn't Destory flow\n");
+			return FAILURE;
+		}
 
-	free(flow_rules);
+		free(flow_rules[i]);
+	}
 
 	/* Deallocate all perftest resources. */
 	if (destroy_ctx(&ctx, &user_param)) {

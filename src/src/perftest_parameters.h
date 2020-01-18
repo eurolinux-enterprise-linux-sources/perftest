@@ -45,7 +45,7 @@
  *  print_report_bw - Calculate the peak and average throughput of the BW test.
  *  print_full_bw_report    - Print the peak and average throughput of the BW test.
  *  print_report_lat - Print the min/max/median latency samples taken from a latency test.
- *  print_report_lat_duration     - Prints only the avergae latency for samples taken from 
+ *  print_report_lat_duration     - Prints only the avergae latency for samples taken from
  *									a latency test with Duration..
  *  set_mtu - set MTU from the port or user.
  *  set_eth_mtu    - set MTU for Raw Ethernet tests.
@@ -55,7 +55,9 @@
 
 #include <infiniband/verbs.h>
 #include <unistd.h>
+#if !defined(__FreeBSD__)
 #include <malloc.h>
+#endif
 #include "get_clock.h"
 
 #ifdef HAVE_CONFIG_H
@@ -121,6 +123,8 @@
 #define DEF_RETRY_COUNT (7)
 #define DEF_CACHE_LINE_SIZE (64)
 #define DEF_PAGE_SIZE (4096)
+#define DEF_FLOWS (1)
+#define RATE_VALUES_COUNT (18)
 
 /* Optimal Values for Inline */
 #define DEF_INLINE_WRITE (220)
@@ -220,6 +224,8 @@
 
 #define MAX_VERSION 16	/* Reserve 15 bytes for version numbers */
 
+#define GET_ARRAY_SIZE(arr) (sizeof((arr)) / sizeof((arr[0])))
+
 /* The Verb of the benchmark. */
 typedef enum { SEND , WRITE, READ, ATOMIC } VerbType;
 
@@ -260,14 +266,26 @@ enum ctx_device {
 	CHELSIO_T5 		= 7,
 	CONNECTX3_PRO		= 8,
 	SKYHAWK			= 9,
-	CONNECTX4		= 10
+	CONNECTX4		= 10,
+	CONNECTX4LX		= 11,
+	QLOGIC_E4		= 12,
+	QLOGIC_AH		= 13
 };
 
 /* Units for rate limiter */
 enum rate_limiter_units {MEGA_BYTE_PS, GIGA_BIT_PS, PACKET_PS};
 
+/*Types rate limit*/
+enum rate_limiter_types {HW_RATE_LIMIT, SW_RATE_LIMIT, DISABLE_RATE_LIMIT};
+
 /* Verbosity Levels for test report */
 enum verbosity_level {FULL_VERBOSITY=-1, OUTPUT_BW=0, OUTPUT_MR, OUTPUT_LAT };
+
+/*Accelerated verbs */
+enum verbs_intf {
+	NORMAL_INTF,
+	ACCL_INTF,
+};
 
 struct cpu_util_data {
 	int enable;
@@ -316,6 +334,8 @@ struct perftest_parameters {
 	int				tcp;
 	int				is_server_port;
 	int				is_client_port;
+	uint16_t			ethertype;
+	int				is_ethertype;
 	int				cpu_freq_f;
 	int				connection_type;
 	int				num_of_qps;
@@ -368,6 +388,8 @@ struct perftest_parameters {
 	int             		pkey_index;
 	int				raw_qos;
 	int				use_cuda;
+	char				*mmap_file;
+	unsigned long			mmap_offset;
 	/* New test params format pilot. will be used in all flags soon,. */
 	enum ctx_test_method 		test_method;
 	enum ibv_transport_type 	transport_type;
@@ -379,11 +401,13 @@ struct perftest_parameters {
 	float 				min_bw_limit;
 	float 				min_msgRate_limit;
 	/* Rate Limiter */
-	int 				is_rate_limiting;
-	int 				rate_limit;
+	char				*rate_limit_str;
+	double 				rate_limit;
+	int				valid_hw_rate_limit;
 	int 				burst_size;
 	enum 				rate_limiter_units rate_units;
-
+	enum 				rate_limiter_types rate_limit_type;
+	int				is_rate_limit_type;
 	enum verbosity_level 		output;
 	int 				cpu_util;
 	struct cpu_util_data 		cpu_util_data;
@@ -400,6 +424,16 @@ struct perftest_parameters {
 	int				masked_atomics;
 	int				cycle_buffer;
 	int				cache_line_size;
+	enum verbs_intf			verb_type;
+	int				is_exp_cq;
+	int				is_exp_qp;
+	int				use_res_domain;
+	int				mr_per_qp;
+	uint16_t			dlid;
+	uint8_t				traffic_class;
+	uint32_t			wait_destroy;
+	int				disable_fcs;
+	int				flows;
 };
 
 struct report_options {
@@ -421,6 +455,37 @@ struct bw_report_data {
 	int sl;
 };
 
+struct rate_gbps_string {
+	enum ibv_rate rate_gbps_enum;
+	char* rate_gbps_str;
+};
+/*
+ *Enums taken from verbs.h
+ */
+static const struct rate_gbps_string RATE_VALUES[RATE_VALUES_COUNT] = {
+	{IBV_RATE_2_5_GBPS, "2.5"},
+	{IBV_RATE_5_GBPS, "5"},
+	{IBV_RATE_10_GBPS, "10"},
+	{IBV_RATE_14_GBPS, "14"},
+	{IBV_RATE_20_GBPS, "20"},
+	{IBV_RATE_25_GBPS, "25"},
+	{IBV_RATE_30_GBPS, "30"},
+	{IBV_RATE_40_GBPS, "40"},
+	{IBV_RATE_56_GBPS, "56"},
+	{IBV_RATE_60_GBPS, "60"},
+	{IBV_RATE_80_GBPS, "80"},
+	{IBV_RATE_100_GBPS, "100"},
+	{IBV_RATE_112_GBPS, "112"},
+	{IBV_RATE_120_GBPS, "120"},
+	{IBV_RATE_168_GBPS, "168"},
+	{IBV_RATE_200_GBPS, "200"},
+	{IBV_RATE_300_GBPS, "300"},
+	{IBV_RATE_MAX, "MAX"}
+};
+
+
+
+
 /* link_layer_str
  *
  * Description : Return a String representation of the link type.
@@ -440,8 +505,8 @@ const char *link_layer_str(uint8_t link_layer);
  *
  * Parameters :
  *
- *	 user_param  - the parameters element.
- *	 argv & argc - from the user prompt.
+ *      user_param  - the parameters element.
+ *      argv & argc - from the user prompt.
  *
  * Return Value : 0 upon success. -1 if it fails.
  */
@@ -453,8 +518,8 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc);
  *
  * Parameters :
  *
- *	 context    - Context of the device.
- *	 user_param - Perftest parameters.
+ *      context    - Context of the device.
+ *      user_param - Perftest parameters.
  *
  * Return Value : SUCCESS, FAILURE.
  */
@@ -466,6 +531,7 @@ int check_link(struct ibv_context *context,struct perftest_parameters *user_para
  *
  * Parameters :
  *
+
  *	 context    - Context of the device.
  *	 user_param - Perftest parameters.
  *

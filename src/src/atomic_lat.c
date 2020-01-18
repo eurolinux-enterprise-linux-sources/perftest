@@ -40,7 +40,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#if !defined(__FreeBSD__)
 #include <malloc.h>
+#endif
 
 #include "get_clock.h"
 #include "perftest_parameters.h"
@@ -95,10 +97,18 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	if (ib_dev_name(ctx.context) == CONNECTIB) {
+	#ifdef HAVE_MASKED_ATOMICS
+	if (check_masked_atomics_support(&ctx)) {
 		user_param.masked_atomics = 1;
 		user_param.use_exp = 1;
 	}
+
+	if (user_param.masked_atomics && (user_param.work_rdma_cm || user_param.use_rdma_cm)) {
+		fprintf(stderr, "atomic test is not supported with -R/-z flag (rdma_cm) with this device.\n");
+		return 1;
+	}
+
+	#endif
 
 	/* See if MTU and link type are valid and supported. */
 	if (check_link(ctx.context,&user_param)) {
@@ -133,9 +143,6 @@ int main(int argc, char *argv[])
 		fprintf(stderr, " Couldn't get context for the device\n");
 		return FAILURE;
 	}
-
-	/* Print basic test information. */
-	ctx_print_test_info(&user_param);
 
 	ALLOCATE(my_dest , struct pingpong_dest , user_param.num_of_qps);
 	memset(my_dest, 0, sizeof(struct pingpong_dest)*user_param.num_of_qps);
@@ -179,6 +186,9 @@ int main(int argc, char *argv[])
 		fprintf(stderr," Unable to set up socket connection\n");
 		return 1;
 	}
+
+	/* Print basic test information. */
+	ctx_print_test_info(&user_param);
 
 	for (i=0; i < user_param.num_of_qps; i++)
 		ctx_print_pingpong_data(&my_dest[i],&user_comm);

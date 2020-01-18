@@ -1,12 +1,15 @@
 Name:		perftest
 Summary:	IB Performance Tests
-Version:	2.4
-Release:	1%{?dist}
+Version:	3.0
+%define		tar_release 3.1.gb36a595
+Release:	7%{?dist}
 License:	GPLv2 or BSD
 Group:		Productivity/Networking/Diagnostic
-Source:		https://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-0.8.gd3c2b22.tar.gz
-Patch0:		perftest-2.0-cflags.patch
+Source0:	https://www.openfabrics.org/downloads/%{name}/%{name}-%{version}-%{tar_release}.tar.gz
+Source1:	ib_atomic_bw.1
+Patch0:		perftest-3.0-cflags.patch
 Patch1:		perftest-enable-s390x-platform-support.patch
+Patch2:		perftest-3.0-fix-memory-leaks.patch
 Url:		http://www.openfabrics.org
 BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires:	libibverbs-devel > 1.1.4, librdmacm-devel > 1.0.14
@@ -24,6 +27,7 @@ RDMA networks.
 %setup -q
 %patch0 -p1 -b .cflags
 %patch1 -p1
+%patch2 -p1
 autoreconf --force --install
 
 %build
@@ -35,13 +39,54 @@ rm -rf %{buildroot}
 for file in ib_{atomic,read,send,write}_{lat,bw}; do
 	install -D -m 0755 $file %{buildroot}%{_bindir}/$file
 done
+for file in raw_ethernet_{lat,bw}; do
+	install -D -m 0755 $file %{buildroot}%{_bindir}/$file
+done
+mkdir -p %{buildroot}%{_mandir}/man1/
+install -D -m 0644 %{SOURCE1} %{buildroot}%{_mandir}/man1/
+pushd %{buildroot}%{_mandir}/man1/
+for file in ib_atomic_lat ib_{read,send,write}_{lat,bw} raw_ethernet_{lat,bw}; do
+	ln -s ib_atomic_bw.1 ${file}.1
+done
+popd
 
 %files
 %defattr(-, root, root)
 %doc README COPYING
-%_bindir/*
+%{_bindir}/*
+%{_mandir}/man1/*
 
 %changelog
+* Thu Aug 18 2016 Jarod Wilson <jarod@redhat.com> - 3.0-7
+- Address a myriad more coverity/clang warnings
+- Add raw_ethernet_* man page symlinks
+- Related: rhbz#1273176
+- Related: rhbz#948476
+
+* Mon Aug 15 2016 Jarod Wilson <jarod@redhat.com> - 3.0-6
+- Update to upstream 3.0-3.1.gb36a595 tarball for upstream fixes
+- Add in manpages
+- Related: rhbz#1365750
+- Resolves: rhbz#948476
+
+* Fri Aug 12 2016 Jarod Wilson <jarod@redhat.com> - 3.0-5
+- Make it possible to actually test with XRC connections again
+- Resolves: rhbz#1365750
+
+* Mon Aug 08 2016 Jarod Wilson <jarod@redhat.com> - 3.0-4
+- Install raw_ethernet{lat,bw} tools
+- Resolves: rhbz#1365182
+
+* Wed May 18 2016 Jarod Wilson <jarod@redhat.com> - 3.0-3
+- Fix additional memory leaks reported and spotted after last fix
+
+* Wed May 18 2016 Jarod Wilson <jarod@redhat.com> - 3.0-2
+- Fix issues uncovered by coverity
+
+* Wed May 04 2016 Jarod Wilson <jarod@redhat.com> - 3.0-1
+- Update to upstream release v3.0
+- Resolves: bz1309586, bz1273176
+
 * Tue Jun 16 2015 Michal Schmidt <mschmidt@redhat.com> - 2.4-1
 - Update to latest upstream release
 - Enable s390x platform

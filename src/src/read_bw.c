@@ -121,9 +121,6 @@ int main(int argc, char *argv[])
 		return FAILURE;
 	}
 
-	/* Print basic test information. */
-	ctx_print_test_info(&user_param);
-
 	ALLOCATE(my_dest , struct pingpong_dest , user_param.num_of_qps);
 	memset(my_dest, 0, sizeof(struct pingpong_dest)*user_param.num_of_qps);
 	ALLOCATE(rem_dest , struct pingpong_dest , user_param.num_of_qps);
@@ -165,6 +162,9 @@ int main(int argc, char *argv[])
 		fprintf(stderr," Unable to set up socket connection\n");
 		return FAILURE;
 	}
+
+	/* Print basic test information. */
+	ctx_print_test_info(&user_param);
 
 	/* Print this machine QP information */
 	for (i=0; i < user_param.num_of_qps; i++)
@@ -243,6 +243,7 @@ int main(int argc, char *argv[])
 				fprintf(stderr, "Failed to destroy resources\n");
 				return 1;
 			}
+			user_comm.rdma_params->work_rdma_cm = ON;
 			return destroy_ctx(user_comm.rdma_ctx,user_comm.rdma_params);
 		}
 
@@ -385,6 +386,7 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "Failed to destroy resources\n");
 			return 1;
 		}
+		user_comm.rdma_params->work_rdma_cm = ON;
 		return destroy_ctx(user_comm.rdma_ctx,user_comm.rdma_params);
 	}
 

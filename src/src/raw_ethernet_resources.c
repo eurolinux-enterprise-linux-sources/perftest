@@ -33,12 +33,18 @@
  *
  * $Id$
  */
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
 #include <getopt.h>
+#include <unistd.h>
 #include </usr/include/netinet/ip.h>
 #include <poll.h>
 #include "perftest_parameters.h"
@@ -49,38 +55,35 @@
 
 struct perftest_parameters* duration_param;
 
-int check_flow_steering_support()
+int check_flow_steering_support(char *dev_name)
 {
 	char* file_name = "/sys/module/mlx4_core/parameters/log_num_mgm_entry_size";
+	char* openibd_path = "/etc/init.d/openibd";
 	FILE *fp;
 	char line[4];
-	fp = fopen(file_name, "r");
-	fgets(line,4,fp);
-	int val = atoi(line);
+	int is_flow_steering_supported = 0;
 
+	if (strstr(dev_name, "mlx5") != NULL)
+		return 0;
+
+	fp = fopen(file_name, "r");
+	if (fp == NULL)
+		return 0;
+	fgets(line,4,fp);
+
+	int val = atoi(line);
 	if (val >= 0) {
 		fprintf(stderr,"flow steering is not supported.\n");
 		fprintf(stderr," please run: echo options mlx4_core log_num_mgm_entry_size=-1 >> /etc/modprobe.d/mlnx.conf\n");
-		fprintf(stderr," and restart the driver: /etc/init.d/openibd restart \n");
-		fclose(fp);
-		return 1;
+		if (access(openibd_path, F_OK) != -1)
+			fprintf(stderr," and restart the driver: %s restart \n", openibd_path);
+		else
+			fprintf(stderr," and restart the driver: modprobe -r mlx4_core; modprobe mlx4_core \n");
+		is_flow_steering_supported =  1;
 	}
 
-	fclose(fp); 
-	return 0;
-}
-
-
-/******************************************************************************
- *
- ******************************************************************************/
-static void mac_from_gid(uint8_t   *mac, uint8_t *gid, uint32_t port)
-{
-	memcpy(mac, gid + 8, 3);
-	memcpy(mac + 3, gid + 13, 3);
-	if(port==1) {
-		mac[0] ^= 2;
-	}
+	fclose(fp);
+	return is_flow_steering_supported;
 }
 
 /******************************************************************************
@@ -114,7 +117,8 @@ static uint16_t ip_checksum	(void * buf,size_t 	  hdr_len)
 /******************************************************************************
  *
  ******************************************************************************/
-void gen_ip_header(void* ip_header_buffer,uint32_t* saddr ,uint32_t* daddr , uint8_t protocol,int sizePkt, int tos)
+void gen_ip_header(void* ip_header_buffer, uint32_t* saddr, uint32_t* daddr,
+		   uint8_t protocol, int pkt_size, int tos, int flows_offset)
 {
 	struct IP_V4_header ip_header;
 
@@ -123,7 +127,7 @@ void gen_ip_header(void* ip_header_buffer,uint32_t* saddr ,uint32_t* daddr , uin
 	ip_header.version = 4;
 	ip_header.ihl = 5;
 	ip_header.tos = (tos == DEF_TOS)? 0 : tos;
-	ip_header.tot_len = htons(sizePkt);
+	ip_header.tot_len = htons(pkt_size);
 	ip_header.id = htons(0);
 	ip_header.frag_off = htons(0);
 	ip_header.ttl = DEFAULT_TTL;
@@ -138,15 +142,15 @@ void gen_ip_header(void* ip_header_buffer,uint32_t* saddr ,uint32_t* daddr , uin
 /******************************************************************************
  *
  ******************************************************************************/
-void gen_udp_header(void* UDP_header_buffer,int* sPort ,int* dPort,uint32_t saddr,uint32_t daddr,int sizePkt)
+void gen_udp_header(void* UDP_header_buffer, int src_port, int dst_port, int pkt_size)
 {
 	struct UDP_header udp_header;
 
 	memset(&udp_header,0,sizeof(struct UDP_header));
 
-	udp_header.uh_sport = htons(*sPort);
-	udp_header.uh_dport = htons(*dPort);
-	udp_header.uh_ulen = htons(sizePkt - sizeof(struct IP_V4_header));
+	udp_header.uh_sport = htons(src_port);
+	udp_header.uh_dport = htons(dst_port);
+	udp_header.uh_ulen = htons(pkt_size - sizeof(struct IP_V4_header));
 	udp_header.uh_sum = 0;
 
 	memcpy(UDP_header_buffer, &udp_header, sizeof(struct UDP_header));
@@ -156,14 +160,14 @@ void gen_udp_header(void* UDP_header_buffer,int* sPort ,int* dPort,uint32_t sadd
 /******************************************************************************
  *
  ******************************************************************************/
-void gen_tcp_header(void* TCP_header_buffer,int* sPort ,int* dPort)
+void gen_tcp_header(void* TCP_header_buffer,int src_port ,int dst_port)
 {
 	struct TCP_header tcp_header;
 
 	memset(&tcp_header,0,sizeof(struct TCP_header));
 
-	tcp_header.th_sport = htons(*sPort);
-	tcp_header.th_dport = htons(*dPort);
+	tcp_header.th_sport = htons(src_port);
+	tcp_header.th_dport = htons(dst_port);
 	tcp_header.th_doff = 5;
 	tcp_header.th_window = htons(8192);
 	memcpy(TCP_header_buffer, &tcp_header, sizeof(struct TCP_header));
@@ -294,6 +298,7 @@ void print_ip_header(struct IP_V4_header* ip_header)
 {
 	char str_ip_s[INET_ADDRSTRLEN];
 	char str_ip_d[INET_ADDRSTRLEN];
+
 	if (NULL == ip_header) {
 		fprintf(stderr, "IP_V4_header pointer is Null\n");
 		return;
@@ -390,31 +395,39 @@ void print_pkt(void* pkt,struct perftest_parameters *user_param)
  *build single packet on ctx buffer
  ******************************************************************************/
 void build_pkt_on_buffer(struct ETH_header* eth_header,
-		struct raw_ethernet_info *my_dest_info,
-		struct raw_ethernet_info *rem_dest_info,
-		struct perftest_parameters *user_param,
-		uint16_t eth_type,
-		uint16_t ip_next_protocol,
-		int print_flag,
-		int sizePkt)
+			 struct raw_ethernet_info *my_dest_info,
+			 struct raw_ethernet_info *rem_dest_info,
+			 struct perftest_parameters *user_param,
+			 uint16_t eth_type, uint16_t ip_next_protocol,
+			 int print_flag, int pkt_size, int flows_offset)
 {
 	void* header_buff = NULL;
-	gen_eth_header(eth_header,my_dest_info->mac,rem_dest_info->mac,eth_type);
-	if(user_param->is_client_ip || user_param->is_server_ip) {
+	int have_ip_header = user_param->is_client_ip || user_param->is_server_ip;
+	int is_udp_or_tcp = user_param->is_client_port && user_param->is_server_port;
+
+	gen_eth_header(eth_header, my_dest_info->mac, rem_dest_info->mac, eth_type);
+
+	if(have_ip_header) {
+		int offset = is_udp_or_tcp ? 0 : flows_offset;
+
 		header_buff = (void*)eth_header + sizeof(struct ETH_header);
-		gen_ip_header(header_buff,&my_dest_info->ip,&rem_dest_info->ip,ip_next_protocol,sizePkt, user_param->tos);
+		gen_ip_header(header_buff, &my_dest_info->ip, &rem_dest_info->ip,
+			      ip_next_protocol, pkt_size, user_param->tos, offset);
 	}
-	if(user_param->is_client_port && user_param->is_server_port) {
+
+	if(is_udp_or_tcp) {
 		header_buff = header_buff + sizeof(struct IP_V4_header);
 		if (user_param->tcp)
-			gen_tcp_header(header_buff,&my_dest_info->port,&rem_dest_info->port);
+			gen_tcp_header(header_buff, my_dest_info->port + flows_offset,
+				       rem_dest_info->port + flows_offset);
 		else
-			gen_udp_header(header_buff,&my_dest_info->port,&rem_dest_info->port,my_dest_info->ip,rem_dest_info->ip,sizePkt);
+			gen_udp_header(header_buff, my_dest_info->port + flows_offset,
+				       rem_dest_info->port+ flows_offset, pkt_size);
 
 	}
 
 	if(print_flag == PRINT_ON) {
-		print_pkt((void*)eth_header,user_param);
+		print_pkt((void*)eth_header, user_param);
 	}
 }
 
@@ -429,29 +442,42 @@ void create_raw_eth_pkt( struct perftest_parameters *user_param,
 		struct raw_ethernet_info	*rem_dest_info)
 {
 	int offset = 0;
+	int i;
 	struct ETH_header* eth_header;
 	uint16_t ip_next_protocol = 0;
-	uint16_t eth_type = (user_param->is_client_ip || user_param->is_server_ip ? IP_ETHER_TYPE : (ctx->size-RAWETH_ADDITION));
+	uint16_t eth_type = user_param->is_ethertype ? user_param->ethertype :
+		(user_param->is_client_ip || user_param->is_server_ip ? IP_ETHER_TYPE : (ctx->size-RAWETH_ADDITION));
 	if(user_param->is_client_port && user_param->is_server_port)
 		ip_next_protocol = (user_param->tcp ? TCP_PROTOCOL : UDP_PROTOCOL);
 
 	DEBUG_LOG(TRACE,">>>>>>%s",__FUNCTION__);
 
-	eth_header = (void*)ctx->buf;
+	eth_header = (void*)ctx->buf[0];
 
 	/* build single packet on ctx buffer */
-	build_pkt_on_buffer(eth_header,my_dest_info,rem_dest_info,user_param,eth_type,ip_next_protocol,PRINT_ON,ctx->size-RAWETH_ADDITION);
+	build_pkt_on_buffer(eth_header, my_dest_info, rem_dest_info, user_param,
+			    eth_type, ip_next_protocol, PRINT_ON,
+			    ctx->size - RAWETH_ADDITION, 0);
 
 	if (user_param->tst == BW) {
 		/* fill ctx buffer with same packets */
 		if (ctx->size <= (ctx->cycle_buffer / 2)) {
 			while (offset < ctx->cycle_buffer-INC(ctx->size,ctx->cache_line_size)) {
-				offset += INC(ctx->size,ctx->cache_line_size);
-				eth_header = (void*)ctx->buf+offset;
-				build_pkt_on_buffer(eth_header,my_dest_info,rem_dest_info,
-						user_param,eth_type,ip_next_protocol,
-						PRINT_OFF,ctx->size-RAWETH_ADDITION);
+				offset += INC(ctx->size, ctx->cache_line_size);
+				eth_header = (void*)ctx->buf[0] + offset;
+				build_pkt_on_buffer(eth_header, my_dest_info, rem_dest_info,
+						    user_param, eth_type, ip_next_protocol,
+						    PRINT_OFF ,ctx->size - RAWETH_ADDITION, 0);
 			}
+		}
+	} else if (user_param->tst == LAT && user_param->flows != DEF_FLOWS) {
+		/* fill ctx buffer with different packets according to flows_offset */
+		for (i = 1; i < user_param->flows; i++) {
+			offset += INC(ctx->size, ctx->cache_line_size);
+			eth_header = (void*)ctx->buf[0] + offset;
+			build_pkt_on_buffer(eth_header, my_dest_info, rem_dest_info,
+					    user_param, eth_type, ip_next_protocol,
+					    PRINT_ON ,ctx->size - RAWETH_ADDITION, i);
 		}
 	}
 
@@ -482,6 +508,132 @@ int calc_flow_rules_size(int is_ip_header,int is_udp_header)
 	return tot_size;
 }
 
+static int set_up_flow_rules(
+		#ifdef HAVE_RAW_ETH_EXP
+		struct ibv_exp_flow_attr **flow_rules,
+		#else
+		struct ibv_flow_attr **flow_rules,
+		#endif
+		struct pingpong_context *ctx,
+		struct perftest_parameters *user_param,
+		int flows_offset)
+{
+
+	#ifdef HAVE_RAW_ETH_EXP
+	struct ibv_exp_flow_spec* spec_info;
+	struct ibv_exp_flow_attr* attr_info;
+	#else
+	struct ibv_flow_spec* spec_info;
+	struct ibv_flow_attr* attr_info;
+	#endif
+
+	void* header_buff;
+	int flow_rules_size;
+	int is_ip = user_param->is_server_ip || user_param->is_client_ip;
+	int is_port = user_param->is_server_port || user_param->is_client_port;
+
+	flow_rules_size = calc_flow_rules_size(is_ip, is_port);
+
+	ALLOCATE(header_buff, uint8_t, flow_rules_size);
+
+	memset(header_buff, 0, flow_rules_size);
+
+	#ifdef HAVE_RAW_ETH_EXP
+	*flow_rules = (struct ibv_exp_flow_attr*)header_buff;
+	attr_info = (struct ibv_exp_flow_attr*)header_buff;
+	#else
+	*flow_rules = (struct ibv_flow_attr*)header_buff;
+	attr_info = (struct ibv_flow_attr*)header_buff;
+	#endif
+
+	attr_info->size = flow_rules_size;
+	attr_info->priority = 0;
+	attr_info->num_of_specs = 1 + is_ip + is_port;
+	attr_info->port = user_param->ib_port;
+	attr_info->flags = 0;
+
+	#ifdef HAVE_RAW_ETH_EXP
+	attr_info->type = IBV_EXP_FLOW_ATTR_NORMAL;
+	header_buff = header_buff + sizeof(struct ibv_exp_flow_attr);
+	spec_info = (struct ibv_exp_flow_spec*)header_buff;
+	spec_info->eth.type = IBV_EXP_FLOW_SPEC_ETH;
+	spec_info->eth.size = sizeof(struct ibv_exp_flow_spec_eth);
+	#else
+	attr_info->type = IBV_FLOW_ATTR_NORMAL;
+	header_buff = header_buff + sizeof(struct ibv_flow_attr);
+	spec_info = (struct ibv_flow_spec*)header_buff;
+	spec_info->eth.type = IBV_FLOW_SPEC_ETH;
+	spec_info->eth.size = sizeof(struct ibv_flow_spec_eth);
+	#endif
+
+	spec_info->eth.val.ether_type = 0;
+
+	mac_from_user(spec_info->eth.val.dst_mac, &(user_param->source_mac[0]), sizeof(user_param->source_mac));
+
+	memset(spec_info->eth.mask.dst_mac, 0xFF,sizeof(spec_info->eth.mask.src_mac));
+	if(user_param->is_server_ip || user_param->is_client_ip) {
+		#ifdef HAVE_RAW_ETH_EXP
+		header_buff = header_buff + sizeof(struct ibv_exp_flow_spec_eth);
+		spec_info = (struct ibv_exp_flow_spec*)header_buff;
+		spec_info->ipv4.type = IBV_EXP_FLOW_SPEC_IPV4;
+		spec_info->ipv4.size = sizeof(struct ibv_exp_flow_spec_ipv4);
+		#else
+		header_buff = header_buff + sizeof(struct ibv_flow_spec_eth);
+		spec_info = (struct ibv_flow_spec*)header_buff;
+		spec_info->ipv4.type = IBV_FLOW_SPEC_IPV4;
+		spec_info->ipv4.size = sizeof(struct ibv_flow_spec_ipv4);
+		#endif
+
+		if(user_param->machine == SERVER) {
+
+			spec_info->ipv4.val.dst_ip = user_param->server_ip;
+			spec_info->ipv4.val.src_ip = user_param->client_ip;
+
+		} else{
+
+			spec_info->ipv4.val.dst_ip = user_param->client_ip;
+			spec_info->ipv4.val.src_ip = user_param->server_ip;
+		}
+
+		memset((void*)&spec_info->ipv4.mask.dst_ip, 0xFF,sizeof(spec_info->ipv4.mask.dst_ip));
+		memset((void*)&spec_info->ipv4.mask.src_ip, 0xFF,sizeof(spec_info->ipv4.mask.src_ip));
+	}
+
+	if(user_param->is_server_port && user_param->is_client_port) {
+		#ifdef HAVE_RAW_ETH_EXP
+		header_buff = header_buff + sizeof(struct ibv_exp_flow_spec_ipv4);
+		spec_info = (struct ibv_exp_flow_spec*)header_buff;
+		spec_info->tcp_udp.type = (user_param->tcp) ? IBV_EXP_FLOW_SPEC_TCP : IBV_EXP_FLOW_SPEC_UDP;
+		spec_info->tcp_udp.size = sizeof(struct ibv_exp_flow_spec_tcp_udp);
+		#else
+		header_buff = header_buff + sizeof(struct ibv_flow_spec_ipv4);
+		spec_info = (struct ibv_flow_spec*)header_buff;
+		spec_info->tcp_udp.type = (user_param->tcp) ? IBV_FLOW_SPEC_TCP : IBV_FLOW_SPEC_UDP;
+		spec_info->tcp_udp.size = sizeof(struct ibv_flow_spec_tcp_udp);
+		#endif
+
+		if(user_param->machine == SERVER) {
+
+			spec_info->tcp_udp.val.dst_port = htons(user_param->server_port);
+			spec_info->tcp_udp.val.src_port = htons(user_param->client_port);
+
+		} else {
+			spec_info->tcp_udp.val.dst_port = htons(user_param->client_port + flows_offset);
+			spec_info->tcp_udp.val.src_port = htons(user_param->server_port + flows_offset);
+		}
+
+		memset((void*)&spec_info->tcp_udp.mask.dst_port, 0xFF,sizeof(spec_info->ipv4.mask.dst_ip));
+		memset((void*)&spec_info->tcp_udp.mask.src_port, 0xFF,sizeof(spec_info->ipv4.mask.src_ip));
+	}
+
+	if (user_param->is_ethertype) {
+		spec_info->eth.val.ether_type = htons(user_param->ethertype);
+		spec_info->eth.mask.ether_type = 0xffff;
+	}
+
+	return 0;
+}
+
 /******************************************************************************
  *send_set_up_connection - init raw_ethernet_info and ibv_flow_spec to user args
  ******************************************************************************/
@@ -498,6 +650,7 @@ int send_set_up_connection(
 {
 
 	union ibv_gid temp_gid;
+	int i;
 
 	if (user_param->gid_index != -1) {
 		if (ibv_query_gid(ctx->context,user_param->ib_port,user_param->gid_index,&temp_gid)) {
@@ -507,127 +660,14 @@ int send_set_up_connection(
 	}
 
 	if (user_param->machine == SERVER || user_param->duplex) {
-
-		#ifdef HAVE_RAW_ETH_EXP
-		struct ibv_exp_flow_spec* spec_info;
-		struct ibv_exp_flow_attr* attr_info;
-		#else
-		struct ibv_flow_spec* spec_info;
-		struct ibv_flow_attr* attr_info;
-		#endif
-
-		void* header_buff;
-		int flow_rules_size;
-		int is_ip = user_param->is_server_ip || user_param->is_client_ip;
-		int is_port = user_param->is_server_port || user_param->is_client_port;
-
-		flow_rules_size = calc_flow_rules_size(is_ip,is_port);
-
-		ALLOCATE(header_buff,uint8_t,flow_rules_size);
-
-		memset(header_buff, 0,flow_rules_size);
-
-		#ifdef HAVE_RAW_ETH_EXP
-		*flow_rules = (struct ibv_exp_flow_attr*)header_buff;
-		attr_info = (struct ibv_exp_flow_attr*)header_buff;
-		#else
-		*flow_rules = (struct ibv_flow_attr*)header_buff;
-		attr_info = (struct ibv_flow_attr*)header_buff;
-		#endif
-
-		attr_info->size = flow_rules_size;
-		attr_info->priority = 0;
-		attr_info->num_of_specs = 1 + is_ip + is_port;
-		attr_info->port = user_param->ib_port;
-		attr_info->flags = 0;
-
-		#ifdef HAVE_RAW_ETH_EXP
-		attr_info->type = IBV_EXP_FLOW_ATTR_NORMAL;
-		header_buff = header_buff + sizeof(struct ibv_exp_flow_attr);
-		spec_info = (struct ibv_exp_flow_spec*)header_buff;
-		spec_info->eth.type = IBV_EXP_FLOW_SPEC_ETH;
-		spec_info->eth.size = sizeof(struct ibv_exp_flow_spec_eth);
-		#else
-		attr_info->type = IBV_FLOW_ATTR_NORMAL;
-		header_buff = header_buff + sizeof(struct ibv_flow_attr);
-		spec_info = (struct ibv_flow_spec*)header_buff;
-		spec_info->eth.type = IBV_FLOW_SPEC_ETH;
-		spec_info->eth.size = sizeof(struct ibv_flow_spec_eth);
-		#endif
-
-		spec_info->eth.val.ether_type = 0;
-
-		if(user_param->is_source_mac) {
-			mac_from_user(spec_info->eth.val.dst_mac , &(user_param->source_mac[0]) , sizeof(user_param->source_mac));
-		} else {
-			mac_from_gid(spec_info->eth.val.dst_mac, temp_gid.raw, user_param->ib_port);
-		}
-
-		memset(spec_info->eth.mask.dst_mac, 0xFF,sizeof(spec_info->eth.mask.src_mac));
-		if(user_param->is_server_ip || user_param->is_client_ip) {
-			#ifdef HAVE_RAW_ETH_EXP
-			header_buff = header_buff + sizeof(struct ibv_exp_flow_spec_eth);
-			spec_info = (struct ibv_exp_flow_spec*)header_buff;
-			spec_info->ipv4.type = IBV_EXP_FLOW_SPEC_IPV4;
-			spec_info->ipv4.size = sizeof(struct ibv_exp_flow_spec_ipv4);
-			#else
-			header_buff = header_buff + sizeof(struct ibv_flow_spec_eth);
-			spec_info = (struct ibv_flow_spec*)header_buff;
-			spec_info->ipv4.type = IBV_FLOW_SPEC_IPV4;
-			spec_info->ipv4.size = sizeof(struct ibv_flow_spec_ipv4);
-			#endif
-
-			if(user_param->machine == SERVER) {
-
-				spec_info->ipv4.val.dst_ip = user_param->server_ip;
-				spec_info->ipv4.val.src_ip = user_param->client_ip;
-
-			} else{
-
-				spec_info->ipv4.val.dst_ip = user_param->client_ip;
-				spec_info->ipv4.val.src_ip = user_param->server_ip;
-			}
-
-			memset((void*)&spec_info->ipv4.mask.dst_ip, 0xFF,sizeof(spec_info->ipv4.mask.dst_ip));
-			memset((void*)&spec_info->ipv4.mask.src_ip, 0xFF,sizeof(spec_info->ipv4.mask.src_ip));
-		}
-
-		if(user_param->is_server_port && user_param->is_client_port) {
-			#ifdef HAVE_RAW_ETH_EXP
-			header_buff = header_buff + sizeof(struct ibv_exp_flow_spec_ipv4);
-			spec_info = (struct ibv_exp_flow_spec*)header_buff;
-			spec_info->tcp_udp.type = (user_param->tcp) ? IBV_EXP_FLOW_SPEC_TCP : IBV_EXP_FLOW_SPEC_UDP;
-			spec_info->tcp_udp.size = sizeof(struct ibv_exp_flow_spec_tcp_udp);
-			#else
-			header_buff = header_buff + sizeof(struct ibv_flow_spec_ipv4);
-			spec_info = (struct ibv_flow_spec*)header_buff;
-			spec_info->tcp_udp.type = (user_param->tcp) ? IBV_FLOW_SPEC_TCP : IBV_FLOW_SPEC_UDP;
-			spec_info->tcp_udp.size = sizeof(struct ibv_flow_spec_tcp_udp);
-			#endif
-			if(user_param->machine == SERVER) {
-
-				spec_info->tcp_udp.val.dst_port = htons(user_param->server_port);
-				spec_info->tcp_udp.val.src_port = htons(user_param->client_port);
-
-			} else{
-				spec_info->tcp_udp.val.dst_port = htons(user_param->client_port);
-				spec_info->tcp_udp.val.src_port = htons(user_param->server_port);
-			}
-
-			memset((void*)&spec_info->tcp_udp.mask.dst_port, 0xFF,sizeof(spec_info->ipv4.mask.dst_ip));
-			memset((void*)&spec_info->tcp_udp.mask.src_port, 0xFF,sizeof(spec_info->ipv4.mask.src_ip));
-		}
+		for (i = 0; i < user_param->flows; i++)
+			set_up_flow_rules(&flow_rules[i], ctx, user_param, i);
 	}
 
 	if (user_param->machine == CLIENT || user_param->duplex) {
 
 		/* set source mac */
-		if(user_param->is_source_mac) {
-			mac_from_user(my_dest_info->mac , &(user_param->source_mac[0]) , sizeof(user_param->source_mac) );
-
-		} else {
-			mac_from_gid(my_dest_info->mac, temp_gid.raw, user_param->ib_port);
-		}
+		mac_from_user(my_dest_info->mac , &(user_param->source_mac[0]) , sizeof(user_param->source_mac) );
 
 		/* set dest mac */
 		mac_from_user(rem_dest_info->mac , &(user_param->dest_mac[0]) , sizeof(user_param->dest_mac) );
@@ -663,7 +703,8 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 	uint64_t		totscnt    = 0;
 	uint64_t		totccnt    = 0;
 	uint64_t		totrcnt    = 0;
-	int			i,index      = 0;
+	int			i;
+	int			index      = 0;
 	int			ne = 0;
 	int			err = 0;
 	uint64_t		*rcnt_for_qp = NULL;
@@ -679,23 +720,26 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 	int			firstRx = 1;
 	int 			rwqe_sent = user_param->rx_depth;
 	int			return_value = 0;
+	int			wc_id;
 
-	ALLOCATE(wc,struct ibv_wc,CTX_POLL_BATCH);
-	ALLOCATE(wc_tx,struct ibv_wc,CTX_POLL_BATCH);
+	ALLOCATE(wc, struct ibv_wc, CTX_POLL_BATCH);
+	ALLOCATE(wc_tx, struct ibv_wc, CTX_POLL_BATCH);
 	ALLOCATE(rcnt_for_qp,uint64_t,user_param->num_of_qps);
 
-	memset(rcnt_for_qp,0,sizeof(uint64_t)*user_param->num_of_qps);
+	memset(wc, 0, sizeof(struct ibv_wc));
+	memset(wc_tx, 0, sizeof(struct ibv_wc));
+	memset(rcnt_for_qp, 0, sizeof(uint64_t) * user_param->num_of_qps);
 
-	tot_iters = (uint64_t)user_param->iters*user_param->num_of_qps;
-	iters=user_param->iters;
+	tot_iters = (uint64_t)user_param->iters * user_param->num_of_qps;
+	iters = user_param->iters;
 
 	if (user_param->noPeak == ON)
 		user_param->tposted[0] = get_cycles();
 
 	if(user_param->test_type == DURATION && user_param->machine == CLIENT && firstRx) {
 		firstRx = OFF;
-		duration_param=user_param;
-		user_param->iters=0;
+		duration_param = user_param;
+		user_param->iters = 0;
 		duration_param->state = START_STATE;
 		signal(SIGALRM, catch_alarm);
 		alarm(user_param->margin);
@@ -705,16 +749,24 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 
 		for (index=0; index < user_param->num_of_qps; index++) {
 
-			while (((ctx->scnt[index] < iters) || ((firstRx == OFF) && (user_param->test_type == DURATION)))&&
+			while (((ctx->scnt[index] < iters) || ((firstRx == OFF) && (user_param->test_type == DURATION))) &&
 					((ctx->scnt[index] - ctx->ccnt[index]) < user_param->tx_depth) && (rcnt_for_qp[index] - ctx->scnt[index] > 0)) {
 
 				if (user_param->post_list == 1 && (ctx->scnt[index] % user_param->cq_mod == 0 && user_param->cq_mod > 1)) {
 					#ifdef HAVE_VERBS_EXP
-					if (user_param->use_exp == 1)
-						ctx->exp_wr[index].exp_send_flags &= ~IBV_EXP_SEND_SIGNALED;
-					else
+					#ifdef HAVE_ACCL_VERBS
+					if (user_param->verb_type == ACCL_INTF)
+						ctx->exp_wr[index].exp_send_flags &= ~IBV_EXP_QP_BURST_SIGNALED;
+					else {
 					#endif
-						ctx->wr[index].send_flags &= ~IBV_SEND_SIGNALED;
+						if (user_param->use_exp == 1)
+							ctx->exp_wr[index].exp_send_flags &= ~IBV_EXP_SEND_SIGNALED;
+						else
+					#endif
+							ctx->wr[index].send_flags &= ~IBV_SEND_SIGNALED;
+					#ifdef HAVE_ACCL_VERBS
+					}
+					#endif
 				}
 
 				if (user_param->noPeak == OFF)
@@ -724,18 +776,29 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 					break;
 				switch_smac_dmac(ctx->wr[index*user_param->post_list].sg_list);
 
-				#if defined(HAVE_VERBS_EXP)
-				if (user_param->use_exp == 1) {
-					err = (ctx->exp_post_send_func_pointer)(ctx->qp[index],&ctx->exp_wr[index*user_param->post_list],&bad_exp_wr);
+				#ifdef HAVE_VERBS_EXP
+				#ifdef HAVE_ACCL_VERBS
+				if (user_param->verb_type == ACCL_INTF) {
+					struct ibv_sge *sg_l = ctx->exp_wr[index*user_param->post_list].sg_list;
+					err = ctx->qp_burst_family[index]->send_burst(ctx->qp[index], sg_l, 1, ctx->exp_wr[index].exp_send_flags);
+				} else {
+				#endif
+					if (user_param->use_exp == 1) {
+						err = (ctx->exp_post_send_func_pointer)(ctx->qp[index],
+							&ctx->exp_wr[index*user_param->post_list], &bad_exp_wr);
+					}
+					else {
+						err = (ctx->post_send_func_pointer)(ctx->qp[index],
+							&ctx->wr[index*user_param->post_list],&bad_wr);
+					}
+				#ifdef HAVE_ACCL_VERBS
 				}
-				else {
-					err = (ctx->post_send_func_pointer)(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
-				}
+				#endif
 				#else
-				err = ibv_post_send(ctx->qp[index],&ctx->wr[index*user_param->post_list],&bad_wr);
+				err = ibv_post_send(ctx->qp[index], &ctx->wr[index*user_param->post_list], &bad_wr);
 				#endif
 				if(err) {
-					fprintf(stderr,"Couldn't post send: qp %d scnt=%lu \n",index,ctx->scnt[index]);
+					fprintf(stderr, "Couldn't post send: qp %d scnt=%lu \n", index, ctx->scnt[index]);
 					return_value = 1;
 					goto cleaning;
 				}
@@ -743,26 +806,35 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 				if (user_param->post_list == 1 && user_param->size <= (ctx->cycle_buffer / 2)) {
 					#ifdef HAVE_VERBS_EXP
 					if (user_param->use_exp == 1)
-						increase_loc_addr(ctx->exp_wr[index].sg_list,user_param->size,
-								ctx->scnt[index],ctx->my_addr[index],0,ctx->cache_line_size,ctx->cycle_buffer);
+						increase_loc_addr(ctx->exp_wr[index].sg_list, user_param->size,
+								  ctx->scnt[index], ctx->my_addr[index], 0,
+								  ctx->cache_line_size, ctx->cycle_buffer);
 					else
 					#endif
-						increase_loc_addr(ctx->wr[index].sg_list,user_param->size,
-								ctx->scnt[index],ctx->my_addr[index],0,ctx->cache_line_size,ctx->cycle_buffer);
+						increase_loc_addr(ctx->wr[index].sg_list, user_param->size,
+								  ctx->scnt[index], ctx->my_addr[index], 0,
+								  ctx->cache_line_size, ctx->cycle_buffer);
 				}
 				ctx->scnt[index] += user_param->post_list;
 				totscnt += user_param->post_list;
 
 				if (user_param->post_list == 1 &&
-					(ctx->scnt[index]%user_param->cq_mod == user_param->cq_mod - 1 ||
-						(user_param->test_type == ITERATIONS && ctx->scnt[index] == iters-1))){
-
+					(ctx->scnt[index]%user_param->cq_mod == (user_param->cq_mod - 1) ||
+						(user_param->test_type == ITERATIONS && ctx->scnt[index] == (iters - 1)))) {
 					#ifdef HAVE_VERBS_EXP
-					if (user_param->use_exp == 1)
-						ctx->exp_wr[index].exp_send_flags |= IBV_EXP_SEND_SIGNALED;
-					else
+					#ifdef HAVE_ACCL_VERBS
+					if (user_param->verb_type == ACCL_INTF)
+						ctx->exp_wr[index].exp_send_flags |= IBV_EXP_QP_BURST_SIGNALED;
+					else {
 					#endif
-						ctx->wr[index].send_flags |= IBV_SEND_SIGNALED;
+						if (user_param->use_exp == 1)
+							ctx->exp_wr[index].exp_send_flags |= IBV_EXP_SEND_SIGNALED;
+						else
+					#endif
+							ctx->wr[index].send_flags |= IBV_SEND_SIGNALED;
+					#ifdef HAVE_ACCL_VERBS
+					}
+					#endif
 				}
 			}
 		}
@@ -770,30 +842,42 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 		if (user_param->use_event) {
 
 			if (ctx_notify_events(ctx->channel)) {
-				fprintf(stderr,"Failed to notify events to CQ");
+				fprintf(stderr, "Failed to notify events to CQ");
 				return_value = 1;
 				goto cleaning;
 			}
 		}
 
-		if ((user_param->test_type == ITERATIONS && (totrcnt < tot_iters)) || (user_param->test_type == DURATION && user_param->state != END_STATE)) {
-			ne = ibv_poll_cq(ctx->recv_cq,CTX_POLL_BATCH,wc);
+		if ((user_param->test_type == ITERATIONS && (totrcnt < tot_iters)) ||
+			(user_param->test_type == DURATION && user_param->state != END_STATE)) {
+			#ifdef HAVE_ACCL_VERBS
+			if (user_param->verb_type == ACCL_INTF)
+				ne = ctx->recv_cq_family->poll_cnt(ctx->recv_cq, CTX_POLL_BATCH);
+			else
+			#endif
+				ne = ibv_poll_cq(ctx->recv_cq, CTX_POLL_BATCH, wc);
+
 			if (ne > 0) {
 				if (user_param->machine == SERVER && firstRx && user_param->test_type == DURATION) {
 					firstRx = OFF;
-					duration_param=user_param;
-					user_param->iters=0;
+					duration_param = user_param;
+					user_param->iters = 0;
 					duration_param->state = START_STATE;
 					signal(SIGALRM, catch_alarm);
 					alarm(user_param->margin);
 				}
 
 				for (i = 0; i < ne; i++) {
-					if (wc[i].status != IBV_WC_SUCCESS) {
-						NOTIFY_COMP_ERROR_RECV(wc[i],totrcnt);
+					wc_id = (user_param->verb_type == ACCL_INTF) ?
+						0 : (int)wc[i].wr_id;
+
+					if (user_param->verb_type != ACCL_INTF) {
+						if (wc[i].status != IBV_WC_SUCCESS) {
+							NOTIFY_COMP_ERROR_RECV(wc[i], totrcnt);
+						}
 					}
 
-					rcnt_for_qp[wc[i].wr_id]++;
+					rcnt_for_qp[wc_id]++;
 					totrcnt++;
 				}
 			} else if (ne < 0) {
@@ -803,24 +887,35 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 			}
 		}
 		if ((totccnt < tot_iters) || (user_param->test_type == DURATION && user_param->state != END_STATE)) {
-			ne = ibv_poll_cq(ctx->send_cq,CTX_POLL_BATCH,wc_tx);
+			#ifdef HAVE_ACCL_VERBS
+			if (user_param->verb_type == ACCL_INTF)
+				ne = ctx->send_cq_family->poll_cnt(ctx->send_cq, CTX_POLL_BATCH);
+			else
+			#endif
+				ne = ibv_poll_cq(ctx->send_cq, CTX_POLL_BATCH, wc_tx);
+
 			if (ne > 0) {
 				for (i = 0; i < ne; i++) {
-					if (wc_tx[i].status != IBV_WC_SUCCESS)
-						NOTIFY_COMP_ERROR_SEND(wc_tx[i],totscnt,totccnt);
+					wc_id = (user_param->verb_type == ACCL_INTF) ?
+						0 : (int)wc[i].wr_id;
+
+					if (user_param->verb_type != ACCL_INTF) {
+						if (wc_tx[i].status != IBV_WC_SUCCESS)
+							NOTIFY_COMP_ERROR_SEND(wc_tx[i], totscnt, totccnt);
+					}
 
 					totccnt += user_param->cq_mod;
-					ctx->ccnt[(int)wc_tx[i].wr_id] += user_param->cq_mod;
+					ctx->ccnt[wc_id] += user_param->cq_mod;
 
 					if (user_param->noPeak == OFF) {
 
 						if ((user_param->test_type == ITERATIONS && (totccnt >= tot_iters - 1)))
 							user_param->tcompleted[tot_iters - 1] = get_cycles();
 						else
-							user_param->tcompleted[totccnt-1] = get_cycles();
+							user_param->tcompleted[totccnt - 1] = get_cycles();
 					}
 
-					if (user_param->test_type==DURATION && user_param->state == SAMPLE_STATE)
+					if (user_param->test_type == DURATION && user_param->state == SAMPLE_STATE)
 						user_param->iters += user_param->cq_mod;
 				}
 			} else if (ne < 0) {
@@ -829,16 +924,30 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 				goto cleaning;
 			}
 			while (rwqe_sent - totccnt < user_param->rx_depth) {    /* Post more than buffer_size */
-				if (user_param->test_type==DURATION || rcnt_for_qp[0] + user_param->rx_depth <= user_param->iters) {
-					if (ibv_post_recv(ctx->qp[0],&ctx->rwr[0],&bad_wr_recv)) {
-						fprintf(stderr, "Couldn't post recv Qp=%d rcnt=%lu\n",0,rcnt_for_qp[0]);
-						return_value = 15;
-						goto cleaning;
+				if (user_param->test_type==DURATION ||
+					rcnt_for_qp[0] + user_param->rx_depth <= user_param->iters) {
+					#ifdef HAVE_ACCL_VERBS
+					if (user_param->verb_type == ACCL_INTF) {
+						if (ctx->qp_burst_family[0]->recv_burst(ctx->qp[0], ctx->rwr[0].sg_list, 1)) {
+							fprintf(stderr, "Couldn't post recv burst (accelerated verbs).\n");
+							return_value = 1;
+							goto cleaning;
+						}
+					} else {
+					#endif
+						if (ibv_post_recv(ctx->qp[0], &ctx->rwr[0], &bad_wr_recv)) {
+							fprintf(stderr, "Couldn't post recv Qp=%d rcnt=%lu\n", 0, rcnt_for_qp[0]);
+							return_value = 15;
+							goto cleaning;
+						}
+					#ifdef HAVE_ACCL_VERBS
 					}
-					if (SIZE(user_param->connection_type,user_param->size,!(int)user_param->machine) <= (ctx->cycle_buffer / 2)) {
+					#endif
+
+					if (SIZE(user_param->connection_type, user_param->size, !(int)user_param->machine) <= (ctx->cycle_buffer / 2)) {
 						increase_loc_addr(ctx->rwr[0].sg_list,
 								user_param->size,
-								rwqe_sent ,
+								rwqe_sent,
 								ctx->rx_buffer_addr[0],user_param->connection_type,
 								ctx->cache_line_size,ctx->cycle_buffer);
 					}

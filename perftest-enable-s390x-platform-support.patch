@@ -14,11 +14,11 @@ Signed-off-by: Alexey Ishchuk <aishchuk@linux.vnet.ibm.com>
  src/get_clock.h | 2 +-
  3 files changed, 5 insertions(+), 5 deletions(-)
 
-diff --git a/README b/README
-index 3eb2eda67d..f2c7c3feeb 100644
---- a/README
-+++ b/README
-@@ -237,7 +237,7 @@ Special feature detailed explanation in tests:
+Index: perftest-3.0/README
+===================================================================
+--- perftest-3.0.orig/README
++++ perftest-3.0/README
+@@ -237,7 +237,7 @@ Special feature detailed explanation in
      ./configure --disable-verbs_exp
      make
  
@@ -27,22 +27,22 @@ index 3eb2eda67d..f2c7c3feeb 100644
  
   7. perftest-2.3 release includes support for dualport VPI test - port1-Ethernet , port2-IB. (in addition to Eth:Eth, IB:IB)
      Currently, running dualport when port1-IB , port2-Ethernet still not working.
-diff --git a/src/get_clock.c b/src/get_clock.c
-index e6a78eac95..e6c3c14005 100755
---- a/src/get_clock.c
-+++ b/src/get_clock.c
+Index: perftest-3.0/src/get_clock.c
+===================================================================
+--- perftest-3.0.orig/src/get_clock.c
++++ perftest-3.0/src/get_clock.c
 @@ -133,7 +133,7 @@ static double sample_get_cpu_mhz(void)
  	return b;
  }
  
 -#ifndef __s390x__
 +#ifndef __s390__
- static double proc_get_cpu_mhz(int no_cpu_freq_fail)
+ static double proc_get_cpu_mhz(int no_cpu_freq_warn)
  {
  	FILE* f;
-@@ -205,8 +205,8 @@ static double proc_get_cpu_mhz(int no_cpu_freq_fail)
+@@ -200,8 +200,8 @@ static double proc_get_cpu_mhz(int no_cp
  
- double get_cpu_mhz(int no_cpu_freq_fail)
+ double get_cpu_mhz(int no_cpu_freq_warn)
  {
 -	#ifdef __s390x__
 -	return sample_get_cpu_mgz();
@@ -51,10 +51,10 @@ index e6a78eac95..e6c3c14005 100755
  	#else
  	double sample, proc, delta;
  	sample = sample_get_cpu_mhz();
-diff --git a/src/get_clock.h b/src/get_clock.h
-index c0f1cfc0a7..b9a750ff3d 100755
---- a/src/get_clock.h
-+++ b/src/get_clock.h
+Index: perftest-3.0/src/get_clock.h
+===================================================================
+--- perftest-3.0.orig/src/get_clock.h
++++ perftest-3.0/src/get_clock.h
 @@ -70,7 +70,7 @@ static inline cycles_t get_cycles()
  	asm volatile ("mov %0=ar.itc" : "=r" (ret));
  	return ret;
@@ -64,5 +64,3 @@ index c0f1cfc0a7..b9a750ff3d 100755
  typedef unsigned long long cycles_t;
  static inline cycles_t get_cycles(void)
  {
--- 
-2.4.3

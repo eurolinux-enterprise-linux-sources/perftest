@@ -2,6 +2,12 @@
 #define RAW_ETHERNET_RESOURCES_H
 
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,7 +19,11 @@
 #include "perftest_resources.h"
 #include "multicast_resources.h"
 #include "perftest_communication.h"
+#if defined(__FreeBSD__)
+#include <infiniband/byteorder.h>
+#else
 #include <asm/byteorder.h>
+#endif
 
 #define INFO "INFO"
 #define TRACE "TRACE"
@@ -57,6 +67,20 @@ struct ETH_header {
 	uint8_t src_mac[6];
 	uint16_t eth_type;
 }__attribute__((packed));
+
+
+#if defined(__FreeBSD__)
+#if BYTE_ORDER == BIG_ENDIAN
+#define __BIG_ENDIAN_BITFIELD
+#define htobe32_const(x) (x)
+#elif BYTE_ORDER == LITTLE_ENDIAN
+#define __LITTLE_ENDIAN_BITFIELD
+#define htobe32_const(x) (((x) >> 24) | (((x) >> 8) & 0xff00) | \
+    ((((x) & 0xffffff) << 8) & 0xff0000) | ((((x) & 0xff) << 24) & 0xff000000))
+#else
+#error "Must set BYTE_ORDER"
+#endif
+#endif
 
 struct IP_V4_header{
 	#if defined(__LITTLE_ENDIAN_BITFIELD)
@@ -108,7 +132,7 @@ void print_ip_header(struct IP_V4_header* ip_header);
 void print_udp_header(struct UDP_header* udp_header);
 void print_pkt(void* pkt,struct perftest_parameters *user_param);
 
-int check_flow_steering_support();
+int check_flow_steering_support(char *dev_name);
 
 /* build_pkt_on_buffer
  * Description: build single Ethernet packet on ctx buffer
@@ -121,7 +145,8 @@ int check_flow_steering_support();
  *		eth_type -
  *		ip_next_protocol -
  *		print_flag - if print_flag == TRUE : print the packet after it's done
- *		sizePkt - size of the requested packet
+ *		pkt_size - size of the requested packet
+ *		flows_offset - current offset from the base flow
  */
 void build_pkt_on_buffer(struct ETH_header* eth_header,
 		struct raw_ethernet_info *my_dest_info,
@@ -130,7 +155,8 @@ void build_pkt_on_buffer(struct ETH_header* eth_header,
 		uint16_t eth_type,
 		uint16_t ip_next_protocol,
 		int print_flag,
-		int sizePkt);
+		int pkt_size,
+		int flows_offset);
 
 /*  create_raw_eth_pkt
  * 	Description: build raw Ethernet packet by user arguments
@@ -188,9 +214,11 @@ int send_set_up_connection(
  * 		ip_header_buff - Pointer to output
  * 		saddr - source IP address of the packet(network order)
  * 		daddr - destination IP address of the packet(network order)
- * 		sizePkt - size of the packet
+ * 		pkt_size - size of the packet
+ *		flows_offset - current offset from the base flow
  */
-void gen_ip_header(void* ip_header_buff,uint32_t* saddr ,uint32_t* daddr,uint8_t protocol,int sizePkt, int tos);
+void gen_ip_header(void* ip_header_buff, uint32_t* saddr, uint32_t* daddr,
+		   uint8_t protocol, int pkt_size, int tos, int flows_offset);
 
 /* gen_udp_header .
 
@@ -198,24 +226,22 @@ void gen_ip_header(void* ip_header_buff,uint32_t* saddr ,uint32_t* daddr,uint8_t
  *
  * Parameters :
  * 		UDP_header_buffer - Pointer to output
- *		sPort - source UDP port of the packet
- *		dPort -destination UDP port of the packet
- *		sadder -source IP address of the packet(using for UPD checksum)(network order)
- *		dadder - source IP address of the packet(using for UPD checksum)(network order)
- *		sizePkt - size of the packet
+ *		src_port - source UDP port of the packet
+ *		dst_port -destination UDP port of the packet
+ *		pkt_size - size of the packet
  */
-void gen_udp_header(void* UDP_header_buffer,int* sPort ,int* dPort,uint32_t saddr,uint32_t daddr,int sizePkt);
+void gen_udp_header(void* UDP_header_buffer, int src_port, int dst_port, int pkt_size);
 
-/* gen_udp_header .
+/* gen_tcp_header .
 
- * Description :create UDP header on buffer
+ * Description :create TCP header on buffer
  *
  * Parameters :
  * 		TCP_header_buffer - Pointer to output
- *		sPort - source TCP port of the packet
- *		dPort -destination TCP port of the packet
+ *		src_port - source TCP port of the packet
+ *		dst_port -destination TCP port of the packet
  */
-void gen_tcp_header(void* TCP_header_buffer,int* sPort ,int* dPort);
+void gen_tcp_header(void* TCP_header_buffer,int src_port ,int dst_port);
 
 /* run_iter_fw
  *

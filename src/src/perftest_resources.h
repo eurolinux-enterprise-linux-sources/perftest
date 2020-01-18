@@ -54,7 +54,11 @@
 #include <infiniband/verbs.h>
 #include <rdma/rdma_cma.h>
 #include <stdint.h>
+#if defined(__FreeBSD__)
+#include <infiniband/byteswap.h>
+#else
 #include <byteswap.h>
+#endif
 #include <math.h>
 #include <arpa/inet.h>
 #include <sys/time.h>
@@ -117,6 +121,8 @@
 
 #define UD_MSG_2_EXP(size) ((log(size))/(log(2)))
 
+#define MASK_IS_SET(mask, attr)      (((mask)&(attr))!=0)
+
 /******************************************************************************
  * Perftest resources Structures and data types.
  ******************************************************************************/
@@ -127,10 +133,10 @@ struct pingpong_context {
 	struct ibv_context			*context;
 	struct ibv_comp_channel			*channel;
 	struct ibv_pd				*pd;
-	struct ibv_mr				*mr;
+	struct ibv_mr				**mr;
 	struct ibv_cq				*send_cq;
 	struct ibv_cq				*recv_cq;
-	void					*buf;
+	void					**buf;
 	struct ibv_ah				**ah;
 	struct ibv_qp				**qp;
 	struct ibv_srq				*srq;
@@ -167,6 +173,13 @@ struct pingpong_context {
 	struct ibv_exp_dct			**dct;
 	struct ibv_exp_send_wr			*exp_wr;
 	#endif
+	#ifdef HAVE_ACCL_VERBS
+	struct ibv_exp_res_domain		*res_domain;
+	struct ibv_exp_cq_family		*send_cq_family;
+	struct ibv_exp_cq_family		*recv_cq_family;
+	struct ibv_exp_qp_burst_family		**qp_burst_family;
+	#endif
+
 };
 
  struct pingpong_dest {
@@ -182,7 +195,7 @@ struct pingpong_context {
  };
 
 /******************************************************************************
- * Perftest resources Methods and interface utilitizes.f
+ * Perftest resources Methods and interface utilitizes.
  ******************************************************************************/
 
 /* link_layer_str
@@ -605,38 +618,6 @@ static __inline int ctx_notify_events(struct ibv_comp_channel *channel)
 	return 0;
 }
 
-
-
-/* gen_udp_header .
-
- * Description :create UDP header on buffer
- *
- * Parameters :
- * 		UDP_header_buffer - Pointer to output
- *		sPort - source UDP port of the packet
- *		dPort -destination UDP port of the packet
- *		sadder -source IP address of the packet(using for UPD checksum)(network order)
- *		dadder - source IP address of the packet(using for UPD checksum)(network order)
- *		sizePkt - size of the packet
- */
-
-void gen_udp_header(void* UDP_header_buffer,int* sPort ,int* dPort,uint32_t saddr,uint32_t daddr,int sizePkt);
-/* increase_rem_addr.
- *
- * Description :
- *	Increases the remote address in RDMA verbs by INC ,
- *  (at least 64 CACHE_LINE size) , so that the system will be a able to cahce the data
- *  in an orginzed way.
- *
- *  Parameters :
- *		wr - The send wqe.
- *		size - size of the message to send.
- *		scnt - The ammount of post_send or post_receive we called.
- *		prim_addr - The address of the original buffer.
- *
- * Return Value : SUCCESS, FAILURE.
- */
-
 #if defined(HAVE_VERBS_EXP)
 static __inline void increase_exp_rem_addr(struct ibv_exp_send_wr *wr,int size,uint64_t scnt,uint64_t prim_addr,VerbType verb, int cache_line_size, int cycle_buffer)
 {
@@ -741,6 +722,65 @@ int perform_warm_up(struct pingpong_context *ctx,struct perftest_parameters *use
 #ifdef HAVE_MASKED_ATOMICS
 struct ibv_qp* ctx_atomic_qp_create(struct pingpong_context *ctx,
 					struct perftest_parameters *user_param);
+int check_masked_atomics_support(struct pingpong_context *ctx);
 #endif
 
+#ifdef HAVE_ACCL_VERBS
+struct ibv_exp_res_domain* create_res_domain(struct pingpong_context *ctx,
+						struct perftest_parameters *user_param);
+#endif
+
+int create_reg_qp_main(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int i, int num_of_qps);
+
+#ifdef HAVE_VERBS_EXP
+int create_exp_qp_main(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int i, int num_of_qps);
+#endif
+
+int create_qp_main(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int i, int num_of_qps);
+
+#ifdef HAVE_VERBS_EXP
+struct ibv_qp* ctx_exp_qp_create(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int qp_index);
+#endif
+
+int modify_qp_to_init(struct pingpong_context *ctx,
+                struct perftest_parameters *user_param, int qp_index, int num_of_qps);
+
+
+/* create_single_mr
+ *
+ * Description :
+ *
+ *	Creates a single MR for a specific QP index.
+ *
+ *	Parameters :
+ *      	ctx - Resources sructure.
+ *		user_param - the perftest parameters.
+ *		qp_index  - QP index to register a MR
+ *
+ * Return Value : SUCCESS, FAILURE.
+ *
+ */
+int create_single_mr(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param, int qp_index);
+
+/* create_mr
+ *
+ * Description :
+ *
+ *	Creates Memory Regions for the test.
+ *	Takes into consideration all user parameters and test type.
+ *
+ *	Parameters :
+ *      	ctx - Resources sructure.
+ *		user_param - the perftest parameters.
+ *
+ * Return Value : SUCCESS, FAILURE.
+ *
+ */
+int create_mr(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param);
 #endif /* PERFTEST_RESOURCES_H */

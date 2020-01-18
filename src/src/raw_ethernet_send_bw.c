@@ -34,6 +34,12 @@
  * $Id$
  */
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,10 +88,6 @@ int main(int argc, char *argv[])
 	strncpy(user_param.version, VERSION, sizeof(user_param.version));
 	user_param.connection_type = RawEth;
 
-	if (check_flow_steering_support()) {
-		return 1;
-	}
-
 	ret_parser = parser(&user_param,argv,argc);
 
 	if (ret_parser) {
@@ -130,6 +132,11 @@ int main(int argc, char *argv[])
 		DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
 		return 1;
 	}
+	GET_STRING(user_param.ib_devname, ibv_get_device_name(ib_dev));
+
+	if (check_flow_steering_support(user_param.ib_devname)) {
+		return 1;
+	}
 
 	/* Getting the relevant context from the device */
 	ctx.context = ibv_open_device(ib_dev);
@@ -149,14 +156,14 @@ int main(int argc, char *argv[])
 	/* Allocating arrays needed for the test. */
 	alloc_ctx(&ctx,&user_param);
 
-	/* Print basic test information. */
-	ctx_print_test_info(&user_param);
-
 	/* set mac address by user choose */
 	if (send_set_up_connection(&flow_rules,&ctx,&user_param,&my_dest_info,&rem_dest_info)) {
 		fprintf(stderr," Unable to set up socket connection\n");
 		return 1;
 	}
+
+	/* Print basic test information. */
+	ctx_print_test_info(&user_param);
 
 	if ( !user_param.raw_mcast && (user_param.machine == SERVER || user_param.duplex)) {
 		print_spec(flow_rules,&user_param);

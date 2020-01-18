@@ -1,0 +1,13 @@
+Index: perftest-3.0/configure.ac
+===================================================================
+--- perftest-3.0.orig/configure.ac
++++ perftest-3.0/configure.ac
+@@ -189,7 +189,7 @@ if [test $HAVE_GID_ATTR = yes] && [test
+         AC_DEFINE([HAVE_GID_ATTR], [1], [Enable GID Attribute query feature])
+ fi
+ 
+-CFLAGS="-g -Wall -D_GNU_SOURCE -O3"
++CFLAGS+=" -g -Wall -D_GNU_SOURCE -O3"
+ AC_SUBST([LIBUMAD])
+ AC_SUBST([LIBMATH])
+ AC_CONFIG_FILES([Makefile])

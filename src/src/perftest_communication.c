@@ -4,16 +4,109 @@
 #include <limits.h>
 #include <unistd.h>
 #include <getopt.h>
+#if !defined(__FreeBSD__)
 #include <malloc.h>
-#include <errno.h>
 #include <byteswap.h>
+#endif
+#include <errno.h>
 #include <arpa/inet.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include "perftest_communication.h"
+#if defined(__FreeBSD__)
+#include <ctype.h>
+#endif
 
+#if defined(__FreeBSD__)
+#define s6_addr32 __u6_addr.__u6_addr32
+/* states: S_N: normal, S_I: comparing integral part, S_F: comparing
+           fractional parts, S_Z: idem but with leading Zeroes only */
+#define  S_N    0x0
+#define  S_I    0x4
+#define  S_F    0x8
+#define  S_Z    0xC
+
+/* result_type: CMP: return diff; LEN: compare using len_diff/diff */
+#define  CMP    2
+#define  LEN    3
+
+
+/* Compare S1 and S2 as strings holding indices/version numbers,
+   returning less than, equal to or greater than zero if S1 is less than,
+   equal to or greater than S2 (for more info, see the Glibc texinfo doc).  */
+
+int
+strverscmp (const char *s1, const char *s2)
+{
+  const unsigned char *p1 = (const unsigned char *) s1;
+  const unsigned char *p2 = (const unsigned char *) s2;
+  unsigned char c1, c2;
+  int state;
+  int diff;
+
+  /* Symbol(s)    0       [1-9]   others  (padding)
+     Transition   (10) 0  (01) d  (00) x  (11) -   */
+  static const unsigned int next_state[] =
+    {
+      /* state    x    d    0    - */
+      /* S_N */  S_N, S_I, S_Z, S_N,
+      /* S_I */  S_N, S_I, S_I, S_I,
+      /* S_F */  S_N, S_F, S_F, S_F,
+      /* S_Z */  S_N, S_F, S_Z, S_Z
+    };
+
+  static const int result_type[] =
+    {
+      /* state   x/x  x/d  x/0  x/-  d/x  d/d  d/0  d/-
+                 0/x  0/d  0/0  0/-  -/x  -/d  -/0  -/- */
+
+      /* S_N */  CMP, CMP, CMP, CMP, CMP, LEN, CMP, CMP,
+                 CMP, CMP, CMP, CMP, CMP, CMP, CMP, CMP,
+      /* S_I */  CMP, -1,  -1,  CMP, +1,  LEN, LEN, CMP,
+                 +1,  LEN, LEN, CMP, CMP, CMP, CMP, CMP,
+      /* S_F */  CMP, CMP, CMP, CMP, CMP, LEN, CMP, CMP,
+                 CMP, CMP, CMP, CMP, CMP, CMP, CMP, CMP,
+      /* S_Z */  CMP, +1,  +1,  CMP, -1,  CMP, CMP, CMP,
+                 -1,  CMP, CMP, CMP
+    };
+
+  if (p1 == p2)
+    return 0;
+
+  c1 = *p1++;
+  c2 = *p2++;
+  /* Hint: '0' is a digit too.  */
+  state = S_N | ((c1 == '0') + (isdigit (c1) != 0));
+
+  while ((diff = c1 - c2) == 0 && c1 != '\0')
+    {
+      state = next_state[state];
+      c1 = *p1++;
+      c2 = *p2++;
+      state |= (c1 == '0') + (isdigit (c1) != 0);
+    }
+
+  state = result_type[state << 2 | (((c2 == '0') + (isdigit (c2) != 0)))];
+
+  switch (state)
+    {
+    case CMP:
+      return diff;
+
+    case LEN:
+      while (isdigit (*p1++))
+	if (!isdigit (*p2++))
+	  return 1;
+
+      return isdigit (*p2) ? -1 : diff;
+
+    default:
+      return state;
+    }
+}
+#endif
 /******************************************************************************
  *
  ******************************************************************************/
@@ -64,9 +157,9 @@ static int post_one_recv_wqe(struct pingpong_context *ctx)
 	struct ibv_recv_wr *bad_wr;
 	struct ibv_sge list;
 
-	list.addr   = (uintptr_t)ctx->buf;
+	list.addr   = (uintptr_t)ctx->buf[0];
 	list.length = sizeof(struct pingpong_dest);
-	list.lkey   = ctx->mr->lkey;
+	list.lkey   = ctx->mr[0]->lkey;
 
 	wr.next = NULL;
 	wr.wr_id = SYNC_SPEC_ID;
@@ -90,9 +183,9 @@ static int post_recv_to_get_ah(struct pingpong_context *ctx)
 	struct ibv_recv_wr *bad_wr;
 	struct ibv_sge list;
 
-	list.addr   = (uintptr_t)ctx->buf;
+	list.addr   = (uintptr_t)ctx->buf[0];
 	list.length = UD_ADDITION + sizeof(uint32_t);
-	list.lkey   = ctx->mr->lkey;
+	list.lkey   = ctx->mr[0]->lkey;
 
 	wr.next = NULL;
 	wr.wr_id = 0;
@@ -120,11 +213,11 @@ static int send_qp_num_for_ah(struct pingpong_context *ctx,
 	struct ibv_wc wc;
 	int ne;
 
-	memcpy(ctx->buf,&ctx->qp[0]->qp_num,sizeof(uint32_t));
+	memcpy(ctx->buf[0], &ctx->qp[0]->qp_num, sizeof(uint32_t));
 
-	list.addr   = (uintptr_t)ctx->buf;
+	list.addr   = (uintptr_t)ctx->buf[0];
 	list.length = sizeof(uint32_t);
-	list.lkey   = ctx->mr->lkey;
+	list.lkey   = ctx->mr[0]->lkey;
 
 	wr.wr_id      = 0;
 	wr.sg_list    = &list;
@@ -177,7 +270,7 @@ static int create_ah_from_wc_recv(struct pingpong_context *ctx,
 		return 1;
 	}
 
-	ctx->ah[0] = ibv_create_ah_from_wc(ctx->pd,&wc,(struct ibv_grh*)ctx->buf,ctx->cm_id->port_num);
+	ctx->ah[0] = ibv_create_ah_from_wc(ctx->pd, &wc, (struct ibv_grh*)ctx->buf[0], ctx->cm_id->port_num);
 	user_param->rem_ud_qpn = ntohl(wc.imm_data);
 	ibv_query_qp(ctx->qp[0],&attr, IBV_QP_QKEY,&init_attr);
 	user_param->rem_ud_qkey = attr.qkey;
@@ -358,13 +451,13 @@ static int rdma_write_keys(struct pingpong_dest *my_dest,
 		m_my_dest.gid.raw[i] = my_dest->gid.raw[i];
 	}
 
-	memcpy(comm->rdma_ctx->buf, &m_my_dest, sizeof(struct pingpong_dest));
+	memcpy(comm->rdma_ctx->buf[0], &m_my_dest, sizeof(struct pingpong_dest));
 	#else
-	memcpy(comm->rdma_ctx->buf, &my_dest, sizeof(struct pingpong_dest));
+	memcpy(comm->rdma_ctx->buf[0], &my_dest, sizeof(struct pingpong_dest));
 	#endif
-	list.addr   = (uintptr_t)comm->rdma_ctx->buf;
+	list.addr   = (uintptr_t)comm->rdma_ctx->buf[0];
 	list.length = sizeof(struct pingpong_dest);
-	list.lkey   = comm->rdma_ctx->mr->lkey;
+	list.lkey   = comm->rdma_ctx->mr[0]->lkey;
 
 
 	wr.wr_id      = SYNC_SPEC_ID;
@@ -413,7 +506,7 @@ static int rdma_read_keys(struct pingpong_dest *rem_dest,
 	}
 
 	#ifdef HAVE_ENDIAN
-	memcpy(&a_rem_dest,comm->rdma_ctx->buf,sizeof(struct pingpong_dest));
+	memcpy(&a_rem_dest,comm->rdma_ctx->buf[0],sizeof(struct pingpong_dest));
 	rem_dest->lid   = ntohl(a_rem_dest.lid);
 	rem_dest->out_reads     = ntohl(a_rem_dest.out_reads);
 	rem_dest->qpn   = ntohl(a_rem_dest.qpn);
@@ -423,7 +516,7 @@ static int rdma_read_keys(struct pingpong_dest *rem_dest,
 	rem_dest->vaddr         = be64toh(a_rem_dest.vaddr);
 	memcpy(rem_dest->gid.raw, &(a_rem_dest.gid), 16*sizeof(uint8_t));
 	#else
-	memcpy(&rem_dest,comm->rdma_ctx->buf,sizeof(struct pingpong_dest));
+	memcpy(&rem_dest,comm->rdma_ctx->buf[0],sizeof(struct pingpong_dest));
 	#endif
 
 	if (post_one_recv_wqe(comm->rdma_ctx)) {
@@ -432,6 +525,98 @@ static int rdma_read_keys(struct pingpong_dest *rem_dest,
 	}
 
 	return 0;
+}
+
+
+#ifdef HAVE_GID_ATTR
+enum who_is_better {LEFT_IS_BETTER, EQUAL, RIGHT_IS_BETTER};
+
+struct roce_version_sorted_enum {
+	enum ibv_exp_roce_gid_type type;
+	int rate;
+};
+
+/* This struct defines which RoCE version is more important for default usage */
+struct roce_version_sorted_enum roce_versions_sorted [] = {
+	{IBV_EXP_IB_ROCE_V1_GID_TYPE, 1},
+	{IBV_EXP_ROCE_V2_GID_TYPE, 2},
+	{IBV_EXP_ROCE_V1_5_GID_TYPE, 3}
+};
+
+int find_roce_version_rate (int roce_ver)
+{
+	int i;
+	int arr_len = GET_ARRAY_SIZE(roce_versions_sorted);
+
+	for (i = 0; i < arr_len; i++) {
+		if (roce_versions_sorted[i].type == roce_ver)
+			return roce_versions_sorted[i].rate;
+	}
+
+	return -1;
+}
+
+/* RoCE V1.5 > V2 > V1
+ * other RoCE versions will be ignored until added to roce_versions_sorted array */
+static int check_better_roce_version (int roce_ver, int roce_ver_rival)
+{
+	int roce_ver_rate = find_roce_version_rate(roce_ver);
+	int roce_ver_rate_rival = find_roce_version_rate(roce_ver_rival);
+
+	if (roce_ver_rate < roce_ver_rate_rival)
+		return RIGHT_IS_BETTER;
+	else if (roce_ver_rate > roce_ver_rate_rival)
+		return LEFT_IS_BETTER;
+	else
+		return EQUAL;
+}
+#endif
+
+static int get_best_gid_index (struct pingpong_context *ctx,
+		  struct perftest_parameters *user_param,
+		  struct ibv_port_attr *attr, int port)
+{
+	int gid_index = 0, i;
+	union ibv_gid temp_gid, temp_gid_rival;
+	int is_ipv4, is_ipv4_rival;
+
+	for (i = 1; i < attr->gid_tbl_len; i++) {
+		if (ibv_query_gid(ctx->context, port, gid_index, &temp_gid)) {
+			return -1;
+		}
+
+		if (ibv_query_gid(ctx->context, port, i, &temp_gid_rival)) {
+			return -1;
+		}
+
+		is_ipv4 = ipv6_addr_v4mapped((struct in6_addr *)temp_gid.raw);
+		is_ipv4_rival = ipv6_addr_v4mapped((struct in6_addr *)temp_gid_rival.raw);
+
+		if (is_ipv4_rival && !is_ipv4 && !user_param->ipv6)
+			gid_index = i;
+		else if (!is_ipv4_rival && is_ipv4 && user_param->ipv6)
+			gid_index = i;
+#ifdef HAVE_GID_ATTR
+		else {
+			int roce_version, roce_version_rival;
+			struct ibv_exp_gid_attr gid_attr;
+
+			gid_attr.comp_mask = IBV_EXP_QUERY_GID_ATTR_TYPE;
+			if (ibv_exp_query_gid_attr(ctx->context, port, gid_index, &gid_attr))
+				return -1;
+			roce_version = gid_attr.type;
+
+			if (ibv_exp_query_gid_attr(ctx->context, port, i, &gid_attr))
+				return -1;
+			roce_version_rival = gid_attr.type;
+
+			if (check_better_roce_version(roce_version, roce_version_rival) == RIGHT_IS_BETTER)
+				gid_index = i;
+		}
+#endif
+	}
+
+	return gid_index;
 }
 
 /******************************************************************************
@@ -538,10 +723,7 @@ int set_up_connection(struct pingpong_context *ctx,
 {
 	int num_of_qps = user_param->num_of_qps;
 	int num_of_qps_per_port = user_param->num_of_qps / 2;
-
 	int i;
-	int is_ipv4;
-
 	union ibv_gid temp_gid;
 	union ibv_gid temp_gid2;
 	struct ibv_port_attr attr;
@@ -558,46 +740,35 @@ int set_up_connection(struct pingpong_context *ctx,
 	}
 
 	if (user_param->gid_index != -1) {
-		if (ibv_query_port(ctx->context,user_param->ib_port,&attr))
+		if (ibv_query_port(ctx->context, user_param->ib_port, &attr))
 			return 0;
 
 		if (user_param->use_gid_user) {
-			if (ibv_query_gid(ctx->context,user_param->ib_port,user_param->gid_index,&temp_gid)) {
+			if (ibv_query_gid(ctx->context, user_param->ib_port, user_param->gid_index, &temp_gid))
 				return -1;
-			}
 		} else {
-			for (i=0 ; i < attr.gid_tbl_len; i++) {
-				if (ibv_query_gid(ctx->context,user_param->ib_port,i,&temp_gid)) {	
-					return -1;
-				}
-				is_ipv4 = ipv6_addr_v4mapped((struct in6_addr *)temp_gid.raw);
-				if ((user_param->ipv6 && !is_ipv4) || (!user_param->ipv6 && is_ipv4)) {
-					user_param->gid_index = i;
-					break;
-				}
-			}
+			user_param->gid_index = get_best_gid_index(ctx, user_param, &attr, user_param->ib_port);
+			if (user_param->gid_index < 0)
+				return -1;
+			if (ibv_query_gid(ctx->context, user_param->ib_port, user_param->gid_index, &temp_gid))
+				return -1;
 		}
 	}
 
-	if (user_param->dualport==ON) {
+	if (user_param->dualport == ON) {
 		if (user_param->gid_index2 != -1) {
-			if (ibv_query_port(ctx->context,user_param->ib_port2,&attr))
+			if (ibv_query_port(ctx->context, user_param->ib_port2, &attr))
 				return 0;
 
 			if (user_param->use_gid_user) {
-				if (ibv_query_gid(ctx->context,user_param->ib_port2,user_param->gid_index,&temp_gid2))
+				if (ibv_query_gid(ctx->context, user_param->ib_port2, user_param->gid_index, &temp_gid2))
 					return -1;
 			} else {
-				for (i=0 ; i < attr.gid_tbl_len; i++) {
-					if (ibv_query_gid(ctx->context,user_param->ib_port2,i,&temp_gid2)) {
+				user_param->gid_index2 = get_best_gid_index(ctx, user_param, &attr, user_param->ib_port2);
+				if (user_param->gid_index2 < 0)
+					return -1;
+				if (ibv_query_gid(ctx->context, user_param->ib_port2, user_param->gid_index2, &temp_gid2))
 						return -1;
-					}
-					is_ipv4 = ipv6_addr_v4mapped((struct in6_addr *)temp_gid2.raw);
-					if ((user_param->ipv6 && !is_ipv4) || (!user_param->ipv6 && is_ipv4)) {
-						user_param->gid_index = i;
-						break;
-					}
-				}
 			}
 		}
 	}
@@ -625,11 +796,14 @@ int set_up_connection(struct pingpong_context *ctx,
 
 		my_dest[i].qpn   = ctx->qp[i]->qp_num;
 		my_dest[i].psn   = lrand48() & 0xffffff;
-		my_dest[i].rkey  = ctx->mr->rkey;
+		my_dest[i].rkey  = ctx->mr[i]->rkey;
 
 		/* Each qp gives his receive buffer address.*/
 		my_dest[i].out_reads = user_param->out_reads;
-		my_dest[i].vaddr = (uintptr_t)ctx->buf + (user_param->num_of_qps + i)*BUFF_SIZE(ctx->size,ctx->cycle_buffer);
+		if (user_param->mr_per_qp)
+			my_dest[i].vaddr = (uintptr_t)ctx->buf[i] + BUFF_SIZE(ctx->size,ctx->cycle_buffer);
+		else
+			my_dest[i].vaddr = (uintptr_t)ctx->buf[0] + (user_param->num_of_qps + i)*BUFF_SIZE(ctx->size,ctx->cycle_buffer);
 
 		if (user_param->dualport==ON) {
 
@@ -693,7 +867,7 @@ int rdma_client_connect(struct pingpong_context *ctx,struct perftest_parameters 
 	struct addrinfo hints;
 
 	memset(&hints, 0, sizeof hints);
-	hints.ai_family   = AF_UNSPEC;
+	hints.ai_family   = AF_INET;
 	hints.ai_socktype = SOCK_STREAM;
 
 	if (check_add_port(&service,user_param->port,user_param->servername,&hints,&res)) {
@@ -701,8 +875,11 @@ int rdma_client_connect(struct pingpong_context *ctx,struct perftest_parameters 
 		return FAILURE;
 	}
 
-	sin.sin_addr.s_addr = ((struct sockaddr_in*)res->ai_addr)->sin_addr.s_addr;
-	sin.sin_family = PF_INET;
+	if (res->ai_family != PF_INET) {
+		return FAILURE;
+	}
+
+	memcpy(&sin, res->ai_addr, sizeof(sin));
 	sin.sin_port = htons((unsigned short)user_param->port);
 
 	while (1) {
@@ -783,7 +960,7 @@ int rdma_client_connect(struct pingpong_context *ctx,struct perftest_parameters 
 	temp = user_param->work_rdma_cm;
 	user_param->work_rdma_cm = ON;
 
-	if (ctx_init(ctx,user_param)) {
+	if (ctx_init(ctx, user_param)) {
 		fprintf(stderr," Unable to create the resources needed by comm struct\n");
 		return FAILURE;
 	}
@@ -816,9 +993,9 @@ int rdma_client_connect(struct pingpong_context *ctx,struct perftest_parameters 
 	}
 
 	if (event->event != RDMA_CM_EVENT_ESTABLISHED) {
-		rdma_ack_cm_event(event);
 		fprintf(stderr, "Unexpected CM event bl blka %d\n", event->event);
-		return FAILURE;
+		rdma_ack_cm_event(event);
+                return FAILURE;
 	}
 
 	if (user_param->connection_type == UD) {
@@ -862,7 +1039,6 @@ int retry_rdma_connect(struct pingpong_context *ctx,
 		}
 		if (rdma_client_connect(ctx,user_param) == SUCCESS)
 			return SUCCESS;
-
 		if (destroy_rdma_resources(ctx,user_param)) {
 			fprintf(stderr,"Unable to destroy rdma resources\n");
 			return FAILURE;
@@ -889,7 +1065,7 @@ int rdma_server_connect(struct pingpong_context *ctx,
 
 	memset(&hints, 0, sizeof hints);
 	hints.ai_flags    = AI_PASSIVE;
-	hints.ai_family   = AF_UNSPEC;
+	hints.ai_family   = AF_INET;
 	hints.ai_socktype = SOCK_STREAM;
 
 	if (check_add_port(&service,user_param->port,user_param->servername,&hints,&res)) {
@@ -897,8 +1073,10 @@ int rdma_server_connect(struct pingpong_context *ctx,
 		return FAILURE;
 	}
 
-	sin.sin_addr.s_addr = 0;
-	sin.sin_family = PF_INET;
+	if (res->ai_family != PF_INET) {
+		return FAILURE;
+	}
+	memcpy(&sin, res->ai_addr, sizeof(sin));
 	sin.sin_port = htons((unsigned short)user_param->port);
 
 	if (rdma_bind_addr(ctx->cm_id_control,(struct sockaddr *)&sin)) {
@@ -992,30 +1170,33 @@ int rdma_server_connect(struct pingpong_context *ctx,
 int create_comm_struct(struct perftest_comm *comm,
 		struct perftest_parameters *user_param)
 {
-	ALLOCATE(comm->rdma_params,struct perftest_parameters,1);
-	memset(comm->rdma_params,0,sizeof(struct perftest_parameters));
+	ALLOCATE(comm->rdma_params, struct perftest_parameters, 1);
+	memset(comm->rdma_params, 0, sizeof(struct perftest_parameters));
 
-	comm->rdma_params->port		   = user_param->port;
-	comm->rdma_params->sockfd      = -1;
-	comm->rdma_params->gid_index   = user_param->gid_index;
-	comm->rdma_params->gid_index2 = user_param->gid_index2;
-	comm->rdma_params->use_rdma_cm = user_param->use_rdma_cm;
-	comm->rdma_params->servername  = user_param->servername;
-	comm->rdma_params->machine 	   = user_param->machine;
-	comm->rdma_params->side		   = LOCAL;
-	comm->rdma_params->verb		   = user_param->verb;
-	comm->rdma_params->use_mcg	   = user_param->use_mcg;
-	comm->rdma_params->duplex	   = user_param->duplex;
-	comm->rdma_params->tos         = DEF_TOS;
-	comm->rdma_params->use_xrc	   = user_param->use_xrc;
+	comm->rdma_params->port		   	= user_param->port;
+	comm->rdma_params->sockfd      		= -1;
+	comm->rdma_params->gid_index   		= user_param->gid_index;
+	comm->rdma_params->gid_index2 		= user_param->gid_index2;
+	comm->rdma_params->use_rdma_cm 		= user_param->use_rdma_cm;
+	comm->rdma_params->servername  		= user_param->servername;
+	comm->rdma_params->machine 	   	= user_param->machine;
+	comm->rdma_params->side		   	= LOCAL;
+	comm->rdma_params->verb		   	= user_param->verb;
+	comm->rdma_params->use_mcg	   	= user_param->use_mcg;
+	comm->rdma_params->duplex	   	= user_param->duplex;
+	comm->rdma_params->tos         		= DEF_TOS;
+	comm->rdma_params->use_xrc	   	= user_param->use_xrc;
 	comm->rdma_params->connection_type	= user_param->connection_type;
-	comm->rdma_params->output      = user_param->output;
-	comm->rdma_params->report_per_port = user_param->report_per_port;
+	comm->rdma_params->output      		= user_param->output;
+	comm->rdma_params->report_per_port 	= user_param->report_per_port;
+	comm->rdma_params->retry_count		= user_param->retry_count;
+	comm->rdma_params->mr_per_qp		= user_param->mr_per_qp;
+	comm->rdma_params->dlid			= user_param->dlid;
 
 	if (user_param->use_rdma_cm) {
 
-		ALLOCATE(comm->rdma_ctx,struct pingpong_context,1);
-		memset(comm->rdma_ctx,0,sizeof(struct pingpong_context));
+		ALLOCATE(comm->rdma_ctx, struct pingpong_context, 1);
+		memset(comm->rdma_ctx, 0, sizeof(struct pingpong_context));
 
 		comm->rdma_params->tx_depth = 1;
 		comm->rdma_params->rx_depth = 1;
@@ -1025,6 +1206,8 @@ int create_comm_struct(struct perftest_comm *comm,
 		comm->rdma_params->size = sizeof(struct pingpong_dest);
 		comm->rdma_ctx->context = NULL;
 
+		ALLOCATE(comm->rdma_ctx->mr, struct ibv_mr*, user_param->num_of_qps);
+		ALLOCATE(comm->rdma_ctx->buf, void* , user_param->num_of_qps);
 		ALLOCATE(comm->rdma_ctx->qp,struct ibv_qp*,comm->rdma_params->num_of_qps);
 		comm->rdma_ctx->buff_size = user_param->cycle_buffer;
 
@@ -1045,31 +1228,24 @@ int establish_connection(struct perftest_comm *comm)
 	int (*ptr)(struct perftest_comm*);
 
 	if (comm->rdma_params->use_rdma_cm) {
-
 		if (comm->rdma_params->machine == CLIENT) {
-
 			if (rdma_client_connect(comm->rdma_ctx,comm->rdma_params)) {
 				fprintf(stderr," Unable to perform rdma_client function\n");
 				return 1;
 			}
-
 		} else {
-
 			if (rdma_server_connect(comm->rdma_ctx,comm->rdma_params)) {
 				fprintf(stderr," Unable to perform rdma_server function\n");
 				return 1;
 			}
 		}
-
 	} else {
-
 		ptr = comm->rdma_params->servername ? &ethernet_client_connect : &ethernet_server_connect;
 
 		if ((*ptr)(comm)) {
 			fprintf(stderr,"Unable to open file descriptor for socket connection");
 			return 1;
 		}
-
 	}
 	return 0;
 }
@@ -1212,7 +1388,7 @@ int rdma_read_data(void *data,
 		return 1;
 	}
 
-	memcpy(data,comm->rdma_ctx->buf,size);
+	memcpy(data,comm->rdma_ctx->buf[0], size);
 
 	if (post_one_recv_wqe(comm->rdma_ctx)) {
 		fprintf(stderr, "Couldn't post send \n");
@@ -1233,11 +1409,11 @@ int rdma_write_data(void *data,
 	struct ibv_sge list;
 	struct ibv_wc wc;
 	int ne;
-	memcpy(comm->rdma_ctx->buf,data,size);
+	memcpy(comm->rdma_ctx->buf[0],data,size);
 
-	list.addr   = (uintptr_t)comm->rdma_ctx->buf;
+	list.addr   = (uintptr_t)comm->rdma_ctx->buf[0];
 	list.length = size;
-	list.lkey   = comm->rdma_ctx->mr->lkey;
+	list.lkey   = comm->rdma_ctx->mr[0]->lkey;
 
 	wr.wr_id      = SYNC_SPEC_ID;
 	wr.sg_list    = &list;
@@ -1341,7 +1517,7 @@ void xchg_bw_reports (struct perftest_comm *comm, struct bw_report_data *my_bw_r
 	if (ctx_xchg_data(comm, (void*) (&temp.iters), (void*) (&rem_bw_rep->iters), size)) {
 		fprintf(stderr," Failed to exchange data between server and clients\n");
 		exit(1);
-	}	 
+	}
 	if (ctx_xchg_data(comm, (void*) (&temp.bw_peak), (void*) (&rem_bw_rep->bw_peak), sizeof(double))) {
 		fprintf(stderr," Failed to exchange data between server and clients\n");
 		exit(1);
@@ -1399,10 +1575,15 @@ void ctx_print_pingpong_data(struct pingpong_dest *element,
 		struct perftest_comm *comm)
 {
 	int is_there_mgid,local_mgid,remote_mgid;
+
+	/* use dlid value from user (if user specified and only on the remote side) */
+	uint16_t dlid = (comm->rdma_params->dlid && comm->rdma_params->side) ?
+				comm->rdma_params->dlid : element->lid;
+
 	if (comm->rdma_params->output != FULL_VERBOSITY)
 		return;
 	/*First of all we print the basic format.*/
-	printf(BASIC_ADDR_FMT,sideArray[comm->rdma_params->side],element->lid,element->qpn,element->psn);
+	printf(BASIC_ADDR_FMT, sideArray[comm->rdma_params->side], dlid, element->qpn, element->psn);
 
 	switch (comm->rdma_params->verb) {
 		case 2  : printf(READ_FMT,element->out_reads);
