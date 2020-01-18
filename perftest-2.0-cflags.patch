@@ -1,0 +1,12 @@
+diff -up perftest-2.3/configure.ac.cflags perftest-2.3/configure.ac
+--- perftest-2.3/configure.ac.cflags	2014-10-17 13:47:35.543196518 -0400
++++ perftest-2.3/configure.ac	2014-10-17 13:47:51.302043917 -0400
+@@ -143,7 +143,7 @@ if [test "$CUDA_H_PATH" ]; then
+ 	LIBS=$LIBS" -lcuda"
+ fi
+ 
+-CFLAGS="-g -Wall -D_GNU_SOURCE -O3"
++CFLAGS+=" -g -Wall -D_GNU_SOURCE -O3"
+ AC_SUBST([LIBUMAD])
+ AC_SUBST([LIBMATH])
+ AC_CONFIG_FILES([Makefile])
